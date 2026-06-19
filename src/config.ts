@@ -1,0 +1,485 @@
+import { GatewayHttpError } from "./errors";
+import { modelPresets, providerPresets } from "./presets";
+import { z } from "zod";
+import type {
+  GatewayAuthConfig,
+  GatewayConfig,
+  GatewayConfigInput,
+  GatewayConfigValidationResult,
+  GatewayDataPolicy,
+  GatewayGlobalPolicy,
+  GatewayStorageConfig,
+  GatewayModelConfig,
+  GatewayProviderConfig,
+  GatewayRoutePolicy,
+  GatewayServerConfig,
+} from "./types";
+
+const dataPolicySchema = z
+  .object({
+    allowTraining: z.boolean().optional(),
+    allowLogging: z.boolean().optional(),
+    allowedRegions: z.array(z.string().min(1)).optional(),
+    blockedRegions: z.array(z.string().min(1)).optional(),
+    allowedProviders: z.array(z.string().min(1)).optional(),
+    blockedProviders: z.array(z.string().min(1)).optional(),
+    zeroDataRetentionRequired: z.boolean().optional(),
+    allowChineseProviders: z.boolean().optional(),
+    allowRequestPolicyExpansion: z.boolean().optional(),
+    byokOnly: z.boolean().optional(),
+    zeroDataRetentionAvailable: z.boolean().optional(),
+  })
+  .passthrough();
+
+const serverSchema = z
+  .object({
+    host: z.string().min(1).optional(),
+    port: z.number().int().min(1).max(65535).optional(),
+    requestTimeoutMs: z.number().min(1).optional(),
+    maxRequestBodyBytes: z.number().min(1).optional(),
+    includeGatewayMetadata: z.boolean().optional(),
+    maxFallbackAttempts: z.number().int().min(1).optional(),
+  })
+  .passthrough();
+
+const authSchema = z
+  .object({
+    apiKeyEnv: z.string().min(1).optional(),
+    required: z.boolean().optional(),
+  })
+  .passthrough();
+
+const storageSchema = z
+  .object({
+    usageLedgerPath: z.string().min(1).optional(),
+  })
+  .passthrough();
+
+const providerSchema = z
+  .object({
+    id: z.string().min(1),
+    displayName: z.string().min(1),
+    kind: z
+      .enum(["openai-compatible", "openai", "anthropic", "google", "bedrock", "vertex", "openrouter"])
+      .default("openai-compatible"),
+    baseUrl: z.string().url().optional(),
+    apiKeyEnv: z.string().min(1).optional(),
+    enabled: z.boolean().optional(),
+    regions: z.array(z.string().min(1)).optional(),
+    jurisdiction: z.string().min(1).optional(),
+    dataPolicy: dataPolicySchema.optional(),
+  })
+  .passthrough();
+
+const modelSchema = z
+  .object({
+    id: z.string().min(1),
+    providerId: z.string().min(1),
+    providerModel: z.string().min(1),
+    aliases: z.array(z.string().min(1)).optional(),
+    capabilities: z
+      .array(z.enum(["chat", "streaming", "tools", "json", "vision", "reasoning", "embeddings"]))
+      .min(1),
+    contextWindow: z.number().int().min(1).optional(),
+    inputUsdPerMillionTokens: z.number().min(0).optional(),
+    outputUsdPerMillionTokens: z.number().min(0).optional(),
+  })
+  .passthrough();
+
+const routeSchema = z
+  .object({
+    id: z.string().min(1),
+    mode: z.enum(["explicit", "fallback", "cheapest", "lowest-latency", "highest-throughput", "balanced"]),
+    modelAliases: z.array(z.string().min(1)).optional(),
+    providerAllowlist: z.array(z.string().min(1)).optional(),
+    providerBlocklist: z.array(z.string().min(1)).optional(),
+    maxInputUsdPerMillionTokens: z.number().min(0).optional(),
+    maxOutputUsdPerMillionTokens: z.number().min(0).optional(),
+    maxLatencyMs: z.number().min(1).optional(),
+    fallbackModelIds: z.array(z.string().min(1)).optional(),
+    dataPolicy: dataPolicySchema.optional(),
+  })
+  .passthrough();
+
+const gatewayConfigInputSchema = z
+  .object({
+    server: serverSchema.optional(),
+    auth: authSchema.optional(),
+    storage: storageSchema.optional(),
+    policy: dataPolicySchema.optional(),
+    providers: z.array(providerSchema).optional(),
+    models: z.array(modelSchema).optional(),
+    routes: z.array(routeSchema).optional(),
+    presets: z.array(z.string().min(1)).optional(),
+  })
+  .passthrough();
+
+const defaultServer: GatewayServerConfig = {
+  host: "127.0.0.1",
+  port: 8787,
+  requestTimeoutMs: 60_000,
+  maxRequestBodyBytes: 1_000_000,
+  includeGatewayMetadata: true,
+  maxFallbackAttempts: 3,
+};
+
+const defaultAuth: GatewayAuthConfig = {
+  apiKeyEnv: "GATEWAY_API_KEY",
+  required: true,
+};
+
+const defaultStorage: GatewayStorageConfig = {};
+
+const defaultPolicy: GatewayGlobalPolicy = {
+  allowTraining: false,
+  allowLogging: false,
+  allowChineseProviders: false,
+  byokOnly: true,
+};
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of items) {
+    if (!seen.has(item.id)) {
+      result.push(item);
+      seen.add(item.id);
+    }
+  }
+  return result;
+}
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function normalizeDataPolicy(input: unknown): GatewayDataPolicy | undefined {
+  if (!isObject(input)) return undefined;
+
+  const allowedRegions = normalizeStringArray(input.allowedRegions);
+  const blockedRegions = normalizeStringArray(input.blockedRegions);
+  const allowedProviders = normalizeStringArray(input.allowedProviders);
+  const blockedProviders = normalizeStringArray(input.blockedProviders);
+
+  return {
+    ...(typeof input.allowTraining === "boolean" ? { allowTraining: input.allowTraining } : {}),
+    ...(typeof input.allowLogging === "boolean" ? { allowLogging: input.allowLogging } : {}),
+    ...(allowedRegions ? { allowedRegions } : {}),
+    ...(blockedRegions ? { blockedRegions } : {}),
+    ...(allowedProviders ? { allowedProviders } : {}),
+    ...(blockedProviders ? { blockedProviders } : {}),
+    ...(typeof input.zeroDataRetentionRequired === "boolean"
+      ? { zeroDataRetentionRequired: input.zeroDataRetentionRequired }
+      : {}),
+    ...(typeof input.allowChineseProviders === "boolean" ? { allowChineseProviders: input.allowChineseProviders } : {}),
+    ...(typeof input.byokOnly === "boolean" ? { byokOnly: input.byokOnly } : {}),
+  };
+}
+
+function normalizeGlobalPolicy(input: unknown): GatewayGlobalPolicy | undefined {
+  const policy = normalizeDataPolicy(input);
+  if (!isObject(input)) return policy;
+  return {
+    ...(policy ?? {}),
+    ...(typeof input.allowRequestPolicyExpansion === "boolean"
+      ? { allowRequestPolicyExpansion: input.allowRequestPolicyExpansion }
+      : {}),
+  };
+}
+
+function normalizeProviderDataPolicy(input: unknown): GatewayProviderConfig["dataPolicy"] | undefined {
+  const policy = normalizeDataPolicy(input);
+  if (!isObject(input)) return policy;
+  return {
+    ...(policy ?? {}),
+    ...(typeof input.zeroDataRetentionAvailable === "boolean"
+      ? { zeroDataRetentionAvailable: input.zeroDataRetentionAvailable }
+      : {}),
+  };
+}
+
+function formatZodIssue(issue: z.ZodIssue): string {
+  const path = issue.path.length > 0 ? issue.path.join(".") : "config";
+  return `${path}: ${issue.message}`;
+}
+
+export function interpolateEnvPlaceholders(
+  value: unknown,
+  env: Record<string, string | undefined> = process.env,
+): unknown {
+  if (typeof value === "string") {
+    return value.replace(/\$\{([A-Z0-9_]+)\}/g, (match, name: string) => {
+      const replacement = env[name];
+      if (replacement === undefined) {
+        throw new EnvInterpolationError(`Missing environment variable ${name} required by config placeholder ${match}.`);
+      }
+      return replacement;
+    });
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => interpolateEnvPlaceholders(item, env));
+  }
+
+  if (isObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, interpolateEnvPlaceholders(item, env)]),
+    );
+  }
+
+  return value;
+}
+
+export class EnvInterpolationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EnvInterpolationError";
+  }
+}
+
+function normalizeProvider(provider: GatewayProviderConfig): GatewayProviderConfig {
+  return {
+    ...provider,
+    kind: provider.kind ?? "openai-compatible",
+    enabled: provider.enabled ?? true,
+    regions: provider.regions ?? [],
+    dataPolicy: normalizeProviderDataPolicy(provider.dataPolicy),
+  };
+}
+
+function normalizeModel(model: GatewayModelConfig): GatewayModelConfig {
+  return {
+    ...model,
+    aliases: model.aliases ?? [],
+    capabilities: model.capabilities ?? ["chat"],
+  };
+}
+
+function withPresetExpansion(input: GatewayConfigInput): {
+  providers: GatewayProviderConfig[];
+  models: GatewayModelConfig[];
+  unknownPresets: string[];
+} {
+  const presetIds = input.presets ?? [];
+  const presetProviders = presetIds
+    .map((id) => providerPresets[id])
+    .filter((provider): provider is GatewayProviderConfig => provider !== undefined);
+  const unknownPresets = presetIds.filter((id) => providerPresets[id] === undefined);
+  const presetProviderIds = new Set(presetProviders.map((provider) => provider.id));
+  const presetModels = modelPresets.filter((model) => presetProviderIds.has(model.providerId));
+
+  return {
+    providers: uniqueById([...(input.providers ?? []), ...presetProviders]).map(normalizeProvider),
+    models: uniqueById([...(input.models ?? []), ...presetModels]).map(normalizeModel),
+    unknownPresets,
+  };
+}
+
+export function normalizeConfig(input: GatewayConfigInput): GatewayConfig {
+  const expanded = withPresetExpansion(input);
+
+  return {
+    server: {
+      ...defaultServer,
+      ...(input.server ?? {}),
+    },
+    auth: {
+      ...defaultAuth,
+      ...(input.auth ?? {}),
+    },
+    storage: {
+      ...defaultStorage,
+      ...(input.storage ?? {}),
+    },
+    policy: {
+      ...defaultPolicy,
+      ...(normalizeGlobalPolicy(input.policy) ?? input.policy ?? {}),
+    },
+    providers: expanded.providers,
+    models: expanded.models,
+    routes: input.routes ?? [],
+  };
+}
+
+function assertString(value: unknown, label: string, errors: string[]): void {
+  if (typeof value !== "string" || value.length === 0) {
+    errors.push(`${label} must be a non-empty string.`);
+  }
+}
+
+function assertNumber(value: unknown, label: string, errors: string[], min?: number): void {
+  if (typeof value !== "number" || !Number.isFinite(value) || (min !== undefined && value < min)) {
+    errors.push(`${label} must be a number${min === undefined ? "" : ` >= ${min}`}.`);
+  }
+}
+
+export function validateConfig(input: GatewayConfigInput): GatewayConfigValidationResult {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  const schemaResult = gatewayConfigInputSchema.safeParse(input);
+  if (!schemaResult.success) {
+    return {
+      ok: false,
+      errors: schemaResult.error.issues.map(formatZodIssue),
+      warnings,
+    };
+  }
+
+  const config = normalizeConfig(schemaResult.data as GatewayConfigInput);
+  const unknownPresets = withPresetExpansion(schemaResult.data as GatewayConfigInput).unknownPresets;
+  for (const preset of unknownPresets) {
+    errors.push(`Unknown preset '${preset}'.`);
+  }
+
+  assertString(config.server.host, "server.host", errors);
+  assertNumber(config.server.port, "server.port", errors, 1);
+  assertNumber(config.server.requestTimeoutMs, "server.requestTimeoutMs", errors, 1);
+  assertNumber(config.server.maxRequestBodyBytes, "server.maxRequestBodyBytes", errors, 1);
+  assertNumber(config.server.maxFallbackAttempts, "server.maxFallbackAttempts", errors, 1);
+  assertString(config.auth.apiKeyEnv, "auth.apiKeyEnv", errors);
+
+  const providerIds = new Set<string>();
+  for (const provider of config.providers) {
+    assertString(provider.id, "provider.id", errors);
+    assertString(provider.displayName, `provider ${provider.id}.displayName`, errors);
+    assertString(provider.kind, `provider ${provider.id}.kind`, errors);
+    if (!provider.baseUrl) {
+      errors.push(`provider ${provider.id} must define baseUrl.`);
+    }
+    if (!provider.apiKeyEnv) {
+      warnings.push(`provider ${provider.id} does not define apiKeyEnv and will not be callable.`);
+    }
+    if (providerIds.has(provider.id)) {
+      errors.push(`provider id '${provider.id}' is duplicated.`);
+    }
+    providerIds.add(provider.id);
+  }
+
+  const modelIds = new Set<string>();
+  for (const model of config.models) {
+    assertString(model.id, "model.id", errors);
+    assertString(model.providerId, `model ${model.id}.providerId`, errors);
+    assertString(model.providerModel, `model ${model.id}.providerModel`, errors);
+    if (!providerIds.has(model.providerId)) {
+      errors.push(`model ${model.id} references unknown provider '${model.providerId}'.`);
+    }
+    if (model.capabilities.length === 0) {
+      errors.push(`model ${model.id} must declare at least one capability.`);
+    }
+    if (modelIds.has(model.id)) {
+      errors.push(`model id '${model.id}' is duplicated.`);
+    }
+    modelIds.add(model.id);
+  }
+
+  for (const route of config.routes) {
+    assertString(route.id, "route.id", errors);
+    assertString(route.mode, `route ${route.id}.mode`, errors);
+    for (const providerId of route.providerAllowlist ?? []) {
+      if (!providerIds.has(providerId)) errors.push(`route ${route.id} allowlists unknown provider '${providerId}'.`);
+    }
+    for (const providerId of route.providerBlocklist ?? []) {
+      if (!providerIds.has(providerId)) errors.push(`route ${route.id} blocks unknown provider '${providerId}'.`);
+    }
+    for (const modelId of route.fallbackModelIds ?? []) {
+      if (!modelIds.has(modelId)) errors.push(`route ${route.id} references unknown fallback model '${modelId}'.`);
+    }
+  }
+
+  if (config.providers.length === 0) {
+    errors.push("At least one provider must be configured.");
+  }
+  if (config.models.length === 0) {
+    errors.push("At least one model must be configured.");
+  }
+
+  return errors.length > 0 ? { ok: false, errors, warnings } : { ok: true, config, warnings };
+}
+
+export async function loadGatewayConfig(path = "gateway.config.json"): Promise<GatewayConfig> {
+  let raw: string;
+  try {
+    raw = await Bun.file(path).text();
+  } catch (error) {
+    throw new GatewayHttpError({
+      status: 500,
+      type: "gateway_config_error",
+      code: "config_not_found",
+      message: `Could not read config file '${path}'.`,
+      raw: error,
+    });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new GatewayHttpError({
+      status: 500,
+      type: "gateway_config_error",
+      code: "config_invalid_json",
+      message: `Config file '${path}' is not valid JSON.`,
+      raw: error,
+    });
+  }
+
+  if (!isObject(parsed)) {
+    throw new GatewayHttpError({
+      status: 500,
+      type: "gateway_config_error",
+      code: "config_invalid",
+      message: `Config file '${path}' must contain a JSON object.`,
+    });
+  }
+
+  let interpolated: unknown;
+  try {
+    interpolated = interpolateEnvPlaceholders(parsed);
+  } catch (error) {
+    throw new GatewayHttpError({
+      status: 500,
+      type: "gateway_config_error",
+      code: "config_env_missing",
+      message: error instanceof Error ? error.message : "Config contains an unresolved environment placeholder.",
+      raw: error,
+    });
+  }
+
+  const result = validateConfig(interpolated as GatewayConfigInput);
+  if (!result.ok) {
+    throw new GatewayHttpError({
+      status: 500,
+      type: "gateway_config_error",
+      code: "config_invalid",
+      message: result.errors.join(" "),
+      raw: result.errors,
+    });
+  }
+
+  return result.config;
+}
+
+export function validateRuntimeSecrets(config: GatewayConfig, env: Record<string, string | undefined>): string[] {
+  const errors: string[] = [];
+
+  if (config.auth.required && !env[config.auth.apiKeyEnv]) {
+    errors.push(`Gateway API key env var ${config.auth.apiKeyEnv} is required.`);
+  }
+
+  const hasCallableProvider = config.providers.some((provider) => {
+    if (provider.enabled === false || !provider.apiKeyEnv) return false;
+    return Boolean(env[provider.apiKeyEnv]);
+  });
+
+  if (!hasCallableProvider) {
+    errors.push("At least one enabled provider must have its apiKeyEnv set in the environment.");
+  }
+
+  return errors;
+}

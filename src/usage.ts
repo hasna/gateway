@@ -1,0 +1,78 @@
+import type { GatewayModelConfig, GatewayUsage, OpenAIUsage } from "./types";
+
+function numberFrom(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function objectFrom(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+export function normalizeUsage(raw: unknown): GatewayUsage {
+  const usage = objectFrom(raw);
+  const promptDetails = objectFrom(usage.prompt_tokens_details);
+  const completionDetails = objectFrom(usage.completion_tokens_details);
+  const cacheDetails = objectFrom(usage.cache_creation_input_tokens);
+
+  const inputTokens =
+    numberFrom(usage.prompt_tokens) ??
+    numberFrom(usage.input_tokens) ??
+    numberFrom(usage.inputTokens) ??
+    0;
+  const outputTokens =
+    numberFrom(usage.completion_tokens) ??
+    numberFrom(usage.output_tokens) ??
+    numberFrom(usage.outputTokens) ??
+    0;
+  const totalTokens =
+    numberFrom(usage.total_tokens) ??
+    numberFrom(usage.totalTokens) ??
+    inputTokens + outputTokens;
+
+  const cachedInputTokens =
+    numberFrom(promptDetails.cached_tokens) ??
+    numberFrom(usage.cached_input_tokens) ??
+    numberFrom(usage.cache_read_input_tokens) ??
+    numberFrom(cacheDetails.cached_tokens);
+  const reasoningTokens =
+    numberFrom(completionDetails.reasoning_tokens) ??
+    numberFrom(usage.reasoning_tokens) ??
+    numberFrom(usage.reasoningTokens);
+
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
+    raw,
+  };
+}
+
+export function toOpenAIUsage(usage: GatewayUsage): OpenAIUsage {
+  return {
+    prompt_tokens: usage.inputTokens,
+    completion_tokens: usage.outputTokens,
+    total_tokens: usage.totalTokens,
+    ...(usage.cachedInputTokens === undefined
+      ? {}
+      : { prompt_tokens_details: { cached_tokens: usage.cachedInputTokens } }),
+    ...(usage.reasoningTokens === undefined
+      ? {}
+      : { completion_tokens_details: { reasoning_tokens: usage.reasoningTokens } }),
+  };
+}
+
+export function estimateCostUsd(usage: GatewayUsage, model: GatewayModelConfig): number | undefined {
+  const inputPrice = model.inputUsdPerMillionTokens;
+  const outputPrice = model.outputUsdPerMillionTokens;
+  if (inputPrice === undefined && outputPrice === undefined) {
+    return undefined;
+  }
+
+  const inputCost = ((usage.inputTokens - (usage.cachedInputTokens ?? 0)) * (inputPrice ?? 0)) / 1_000_000;
+  const outputCost = (usage.outputTokens * (outputPrice ?? 0)) / 1_000_000;
+  return Number((inputCost + outputCost).toFixed(12));
+}

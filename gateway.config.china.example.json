@@ -1,0 +1,56 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "requestTimeoutMs": 60000,
+    "maxRequestBodyBytes": 1000000,
+    "includeGatewayMetadata": true,
+    "maxFallbackAttempts": 3
+  },
+  "auth": {
+    "apiKeyEnv": "GATEWAY_API_KEY",
+    "required": true
+  },
+  "policy": {
+    "allowTraining": false,
+    "allowLogging": true,
+    "allowChineseProviders": true,
+    "allowedRegions": ["cn", "sg"]
+  },
+  "presets": ["deepseek", "qwen", "kimi", "zai", "siliconflow"],
+  "routes": [
+    {
+      "id": "china-fast",
+      "mode": "fallback",
+      "modelAliases": ["fast", "china-fast"],
+      "fallbackModelIds": [
+        "deepseek/deepseek-v4-flash",
+        "qwen/qwen-plus",
+        "kimi/kimi-k2.7-code-highspeed"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowLogging": true,
+        "allowChineseProviders": true,
+        "allowedRegions": ["cn", "sg"]
+      }
+    },
+    {
+      "id": "china-coding",
+      "mode": "fallback",
+      "modelAliases": ["coding", "china-coding"],
+      "fallbackModelIds": [
+        "deepseek/deepseek-v4-pro",
+        "qwen/qwen3-coder-plus",
+        "kimi/kimi-k2.7-code",
+        "zai/glm-5.1"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowLogging": true,
+        "allowChineseProviders": true,
+        "allowedRegions": ["cn", "sg"]
+      }
+    }
+  ]
+}

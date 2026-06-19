@@ -1,0 +1,98 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "requestTimeoutMs": 60000,
+    "maxRequestBodyBytes": 1000000,
+    "includeGatewayMetadata": true,
+    "maxFallbackAttempts": 3
+  },
+  "auth": {
+    "apiKeyEnv": "GATEWAY_API_KEY",
+    "required": true
+  },
+  "policy": {
+    "allowTraining": false,
+    "allowChineseProviders": true
+  },
+  "presets": [
+    "openai",
+    "openrouter",
+    "deepseek",
+    "qwen",
+    "kimi",
+    "zai",
+    "siliconflow"
+  ],
+  "routes": [
+    {
+      "id": "fast",
+      "mode": "fallback",
+      "modelAliases": ["fast"],
+      "fallbackModelIds": [
+        "openai/gpt-4o-mini",
+        "openrouter/openai/gpt-4.1-mini",
+        "deepseek/deepseek-v4-flash",
+        "qwen/qwen-plus"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowLogging": true,
+        "allowChineseProviders": true,
+        "allowedRegions": ["us", "global", "sg", "cn"]
+      }
+    },
+    {
+      "id": "coding",
+      "mode": "fallback",
+      "modelAliases": ["coding"],
+      "fallbackModelIds": [
+        "openai/gpt-4.1-mini",
+        "deepseek/deepseek-v4-pro",
+        "qwen/qwen3-coder-plus",
+        "kimi/kimi-k2.7-code",
+        "zai/glm-5.1"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowLogging": true,
+        "allowChineseProviders": true,
+        "allowedRegions": ["us", "global", "sg", "cn"]
+      }
+    },
+    {
+      "id": "no-china-coding",
+      "mode": "fallback",
+      "modelAliases": ["coding:no-china", "no-china-coding"],
+      "providerBlocklist": ["deepseek", "qwen", "kimi", "zai", "siliconflow"],
+      "fallbackModelIds": [
+        "openai/gpt-4.1-mini",
+        "openrouter/openai/gpt-4.1-mini"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowLogging": false,
+        "allowChineseProviders": false,
+        "blockedRegions": ["cn"]
+      }
+    },
+    {
+      "id": "china-coding",
+      "mode": "fallback",
+      "modelAliases": ["china-coding"],
+      "providerAllowlist": ["deepseek", "qwen", "kimi"],
+      "fallbackModelIds": [
+        "deepseek/deepseek-v4-pro",
+        "qwen/qwen3-coder-plus",
+        "kimi/kimi-k2.7-code",
+        "zai/glm-5.1"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowLogging": true,
+        "allowChineseProviders": true,
+        "allowedRegions": ["cn", "sg"]
+      }
+    }
+  ]
+}

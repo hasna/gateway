@@ -1,0 +1,50 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "requestTimeoutMs": 60000,
+    "maxRequestBodyBytes": 1000000,
+    "includeGatewayMetadata": true,
+    "maxFallbackAttempts": 2
+  },
+  "auth": {
+    "apiKeyEnv": "GATEWAY_API_KEY",
+    "required": true
+  },
+  "policy": {
+    "allowTraining": false,
+    "allowChineseProviders": false,
+    "blockedRegions": ["cn"]
+  },
+  "presets": ["openai", "openrouter"],
+  "routes": [
+    {
+      "id": "fast",
+      "mode": "fallback",
+      "modelAliases": ["fast"],
+      "fallbackModelIds": [
+        "openai/gpt-4o-mini",
+        "openrouter/openai/gpt-4.1-mini"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowChineseProviders": false,
+        "blockedRegions": ["cn"]
+      }
+    },
+    {
+      "id": "coding:no-china",
+      "mode": "fallback",
+      "modelAliases": ["coding:no-china", "coding"],
+      "fallbackModelIds": [
+        "openai/gpt-4.1-mini",
+        "openrouter/openai/gpt-4.1-mini"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowChineseProviders": false,
+        "blockedRegions": ["cn"]
+      }
+    }
+  ]
+}
