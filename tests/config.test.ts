@@ -37,6 +37,24 @@ describe("config validation", () => {
     }
   });
 
+  test("rejects cumulative budgets without a usage ledger path", () => {
+    const config = testConfig();
+    config.budgets = [
+      {
+        id: "daily",
+        window: "daily",
+        mode: "hard",
+        maxTotalTokens: 100,
+      },
+    ];
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("requires storage.usageLedgerPath");
+    }
+  });
+
   test("interpolates environment placeholders before loading validation", () => {
     const interpolated = interpolateEnvPlaceholders(
       {

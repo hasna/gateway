@@ -12,6 +12,7 @@ export type StreamTransformOptions = {
   model: GatewayModelConfig;
   decision: GatewayRouteDecision;
   includeGatewayMetadata: boolean;
+  onUsage?: (rawUsage: unknown) => Promise<void> | void;
   onComplete?: (result: StreamCompletionResult) => Promise<void> | void;
 };
 
@@ -50,6 +51,26 @@ function providerStreamError(message: string): string {
       message,
       type: "provider_stream_error",
       code: "provider_stream_invalid_chunk",
+    },
+  });
+}
+
+function streamErrorDetails(error: unknown): { message: string; type: string; code: string } {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  return {
+    message: error instanceof Error ? error.message : "Gateway stream processing failed.",
+    type: typeof record.type === "string" ? record.type : "gateway_stream_error",
+    code: typeof record.code === "string" ? record.code : "gateway_stream_failed",
+  };
+}
+
+function gatewayStreamError(error: unknown): string {
+  const details = streamErrorDetails(error);
+  return JSON.stringify({
+    error: {
+      message: details.message,
+      type: details.type,
+      code: details.code,
     },
   });
 }
@@ -116,32 +137,54 @@ export function transformOpenAICompatibleStream(response: Response, options: Str
         await options.onComplete?.(result);
       }
 
+      async function failStream(errorPayload: string, result: StreamCompletionResult): Promise<void> {
+        streamFailed = true;
+        controller.enqueue(encoder.encode(`data: ${errorPayload}\n\n`));
+        if (!doneSent) {
+          controller.enqueue(encoder.encode(doneFrame));
+          doneSent = true;
+        }
+        await completeOnce(result);
+        closeOnce();
+      }
+
       async function enqueuePayload(payload: string): Promise<void> {
+        let normalized: NormalizedChunk;
         try {
-          const normalized = normalizeChunk(payload, options);
-          if (normalized.rawUsage !== undefined) rawUsage = normalized.rawUsage;
-          if (normalized.done) {
-            if (!doneSent) {
-              controller.enqueue(encoder.encode(doneFrame));
-              doneSent = true;
-            }
-            return;
-          }
-          controller.enqueue(encoder.encode(`data: ${normalized.payload}\n\n`));
+          normalized = normalizeChunk(payload, options);
         } catch {
-          streamFailed = true;
-          controller.enqueue(encoder.encode(`data: ${providerStreamError("Provider stream chunk was not valid JSON.")}\n\n`));
-          if (!doneSent) {
-            controller.enqueue(encoder.encode(doneFrame));
-            doneSent = true;
-          }
-          await completeOnce({
+          await failStream(providerStreamError("Provider stream chunk was not valid JSON."), {
             status: "error",
             errorType: "provider_stream_error",
             errorCode: "provider_stream_invalid_chunk",
           });
-          closeOnce();
+          return;
         }
+
+        if (normalized.rawUsage !== undefined) {
+          rawUsage = normalized.rawUsage;
+          try {
+            await options.onUsage?.(normalized.rawUsage);
+          } catch (error) {
+            const details = streamErrorDetails(error);
+            await failStream(gatewayStreamError(error), {
+              status: "error",
+              errorType: details.type,
+              errorCode: details.code,
+            });
+            return;
+          }
+        }
+
+        if (normalized.done) {
+          if (!doneSent) {
+            controller.enqueue(encoder.encode(doneFrame));
+            doneSent = true;
+          }
+          return;
+        }
+
+        controller.enqueue(encoder.encode(`data: ${normalized.payload}\n\n`));
       }
 
       try {

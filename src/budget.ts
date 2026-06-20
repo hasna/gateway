@@ -14,6 +14,7 @@ export type GatewayBudgetSpend = {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  unknownCostEvents: number;
 };
 
 export type GatewayBudgetStatus = {
@@ -45,6 +46,7 @@ const zeroSpend: GatewayBudgetSpend = {
   inputTokens: 0,
   outputTokens: 0,
   totalTokens: 0,
+  unknownCostEvents: 0,
 };
 
 function roundMoney(value: number): number {
@@ -103,6 +105,7 @@ function addSpend(a: GatewayBudgetSpend, b: Partial<GatewayBudgetSpend>): Gatewa
     inputTokens: a.inputTokens + (b.inputTokens ?? 0),
     outputTokens: a.outputTokens + (b.outputTokens ?? 0),
     totalTokens: a.totalTokens + (b.totalTokens ?? 0),
+    unknownCostEvents: a.unknownCostEvents + (b.unknownCostEvents ?? 0),
   };
 }
 
@@ -115,6 +118,7 @@ export function spendFromUsage(usage: GatewayUsage | undefined, estimatedCostUsd
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     totalTokens: usage.totalTokens,
+    unknownCostEvents: estimatedCostUsd === undefined && usage.totalTokens > 0 ? 1 : 0,
   };
 }
 
@@ -144,11 +148,16 @@ function recordInWindow(record: LedgerLikeRecord, budget: GatewayBudgetConfig, n
 }
 
 function spendFromRecord(record: LedgerLikeRecord): GatewayBudgetSpend {
+  const inputTokens = typeof record.usage?.inputTokens === "number" ? record.usage.inputTokens : 0;
+  const outputTokens = typeof record.usage?.outputTokens === "number" ? record.usage.outputTokens : 0;
+  const totalTokens = typeof record.usage?.totalTokens === "number" ? record.usage.totalTokens : 0;
+  const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || totalTokens > 0;
   return {
     usd: typeof record.estimatedCostUsd === "number" ? record.estimatedCostUsd : 0,
-    inputTokens: typeof record.usage?.inputTokens === "number" ? record.usage.inputTokens : 0,
-    outputTokens: typeof record.usage?.outputTokens === "number" ? record.usage.outputTokens : 0,
-    totalTokens: typeof record.usage?.totalTokens === "number" ? record.usage.totalTokens : 0,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    unknownCostEvents: typeof record.estimatedCostUsd === "number" || !hasTokenUsage ? 0 : 1,
   };
 }
 
@@ -192,6 +201,9 @@ function limitExhausted(limit: number | undefined, spent: number): boolean {
 function warningsFor(budget: GatewayBudgetConfig, spent: GatewayBudgetSpend): string[] {
   const threshold = budget.warningThreshold ?? (budget.mode === "soft" ? 0.8 : undefined);
   const warnings: string[] = [];
+  if (budget.maxUsd !== undefined && spent.unknownCostEvents > 0) {
+    warnings.push("USD budget cannot be verified because model pricing is missing");
+  }
   const check = (label: string, limit: number | undefined, value: number) => {
     if (limit === undefined) return;
     if (value > limit) {
@@ -208,12 +220,15 @@ function warningsFor(budget: GatewayBudgetConfig, spent: GatewayBudgetSpend): st
 }
 
 function buildStatus(budget: GatewayBudgetConfig, context: GatewayBudgetContext, spent: GatewayBudgetSpend, now: Date): GatewayBudgetStatus {
+  const unknownCostBlocksUsdBudget = budget.maxUsd !== undefined && spent.unknownCostEvents > 0;
   const exceeded =
+    unknownCostBlocksUsdBudget ||
     limitExceeded(budget.maxUsd, spent.usd) ||
     limitExceeded(budget.maxInputTokens, spent.inputTokens) ||
     limitExceeded(budget.maxOutputTokens, spent.outputTokens) ||
     limitExceeded(budget.maxTotalTokens, spent.totalTokens);
   const exhausted =
+    unknownCostBlocksUsdBudget ||
     limitExhausted(budget.maxUsd, spent.usd) ||
     limitExhausted(budget.maxInputTokens, spent.inputTokens) ||
     limitExhausted(budget.maxOutputTokens, spent.outputTokens) ||
@@ -224,7 +239,9 @@ function buildStatus(budget: GatewayBudgetConfig, context: GatewayBudgetContext,
     windowStart: windowStartFor(budget, now),
     spent,
     remaining: {
-      ...(budget.maxUsd === undefined ? {} : { usd: remainingValue(budget.maxUsd, spent.usd) }),
+      ...(budget.maxUsd === undefined
+        ? {}
+        : { usd: unknownCostBlocksUsdBudget ? 0 : remainingValue(budget.maxUsd, spent.usd) }),
       ...(budget.maxInputTokens === undefined
         ? {}
         : { inputTokens: remainingTokenValue(budget.maxInputTokens, spent.inputTokens) }),
@@ -241,6 +258,17 @@ function buildStatus(budget: GatewayBudgetConfig, context: GatewayBudgetContext,
   };
 }
 
+function assertLedgerConfiguredForBudget(config: GatewayConfig, budget: GatewayBudgetConfig): void {
+  if (budget.window === "per-request" || config.storage.usageLedgerPath) return;
+  throw new GatewayHttpError({
+    status: 500,
+    type: "gateway_config_error",
+    code: "budget_ledger_missing",
+    message: `Budget '${budget.id}' uses a ${budget.window} window and requires storage.usageLedgerPath for cumulative enforcement.`,
+    raw: budget,
+  });
+}
+
 export async function getBudgetStatuses(
   config: GatewayConfig,
   context: GatewayBudgetContext = {},
@@ -248,13 +276,14 @@ export async function getBudgetStatuses(
 ): Promise<GatewayBudgetStatus[]> {
   const includeUnmatched = options.includeUnmatched ?? !hasContext(context);
   const now = new Date();
-  const records = await readLedger(config.storage.usageLedgerPath);
+  const records = config.storage.usageLedgerPath ? await readLedger(config.storage.usageLedgerPath) : [];
   const budgets = options.budgetId ? config.budgets.filter((budget) => budget.id === options.budgetId) : config.budgets;
   const statuses: GatewayBudgetStatus[] = [];
 
   for (const budget of budgets) {
     const effectiveContext = hasContext(context) ? context : scopeContext(budget);
     if (!includeUnmatched && !budgetMatchesContext(budget, effectiveContext)) continue;
+    assertLedgerConfiguredForBudget(config, budget);
 
     let spent = { ...zeroSpend };
     for (const record of records) {

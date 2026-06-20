@@ -443,6 +443,9 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
     ) {
       errors.push(`budget ${budget.id} must define at least one money or token limit.`);
     }
+    if (budget.window !== "per-request" && !config.storage.usageLedgerPath) {
+      errors.push(`budget ${budget.id} uses a ${budget.window} window and requires storage.usageLedgerPath.`);
+    }
   }
 
   if (config.providers.length === 0) {

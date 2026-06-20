@@ -327,32 +327,48 @@ export async function createChatCompletionStream(
       latencyMs,
     });
 
+    let streamBudgetAccounted = false;
+    const accountStreamingUsage = async (
+      rawUsage: unknown,
+      status: "success" | "error",
+      errorType?: string,
+      errorCode?: string,
+    ) => {
+      const usage = rawUsage === undefined ? undefined : normalizeUsage(rawUsage);
+      const estimatedCostUsd = usage ? estimateCostUsd(usage, candidate.model) : undefined;
+      const budgets = await evaluateBudgetPostflight(
+        options.config,
+        budgetContext,
+        spendFromUsage(usage, estimatedCostUsd),
+      );
+      await appendUsageLedger({
+        config: options.config,
+        provider: candidate.provider,
+        model: candidate.model,
+        decision: route.decision,
+        context: budgetContext,
+        usage,
+        estimatedCostUsd,
+        budgets,
+        status,
+        errorType,
+        errorCode,
+      });
+      streamBudgetAccounted = true;
+      if (status === "success") assertBudgetPostflight(budgets);
+    };
+
     return transformOpenAICompatibleStream(response, {
       provider: candidate.provider,
       model: candidate.model,
       decision: route.decision,
       includeGatewayMetadata: includeGatewayMetadata(options, request),
+      onUsage: async (rawUsage) => {
+        await accountStreamingUsage(rawUsage, "success");
+      },
       onComplete: async (result) => {
-        const usage = result.rawUsage === undefined ? undefined : normalizeUsage(result.rawUsage);
-        const estimatedCostUsd = usage ? estimateCostUsd(usage, candidate.model) : undefined;
-        const budgets = await evaluateBudgetPostflight(
-          options.config,
-          budgetContext,
-          spendFromUsage(usage, estimatedCostUsd),
-        );
-        await appendUsageLedger({
-          config: options.config,
-          provider: candidate.provider,
-          model: candidate.model,
-          decision: route.decision,
-          context: budgetContext,
-          usage,
-          estimatedCostUsd,
-          budgets,
-          status: result.status,
-          errorType: result.errorType,
-          errorCode: result.errorCode,
-        });
+        if (streamBudgetAccounted) return;
+        await accountStreamingUsage(result.rawUsage, result.status, result.errorType, result.errorCode);
       },
     });
   }
