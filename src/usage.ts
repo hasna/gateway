@@ -68,11 +68,16 @@ export function toOpenAIUsage(usage: GatewayUsage): OpenAIUsage {
 export function estimateCostUsd(usage: GatewayUsage, model: GatewayModelConfig): number | undefined {
   const inputPrice = model.inputUsdPerMillionTokens;
   const outputPrice = model.outputUsdPerMillionTokens;
-  if (inputPrice === undefined && outputPrice === undefined) {
+  const billableInputTokens = Math.max(0, usage.inputTokens - (usage.cachedInputTokens ?? 0));
+
+  if (
+    (billableInputTokens > 0 && inputPrice === undefined) ||
+    (usage.outputTokens > 0 && outputPrice === undefined)
+  ) {
     return undefined;
   }
 
-  const inputCost = ((usage.inputTokens - (usage.cachedInputTokens ?? 0)) * (inputPrice ?? 0)) / 1_000_000;
+  const inputCost = (billableInputTokens * (inputPrice ?? 0)) / 1_000_000;
   const outputCost = (usage.outputTokens * (outputPrice ?? 0)) / 1_000_000;
   return Number((inputCost + outputCost).toFixed(12));
 }

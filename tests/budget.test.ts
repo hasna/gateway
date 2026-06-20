@@ -220,6 +220,48 @@ describe("gateway budgets", () => {
     await unlink(path);
   });
 
+  test("fails closed for hard USD budgets when selected model pricing is partially unknown", async () => {
+    const path = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.jsonl`;
+    const config = testConfig();
+    config.storage.usageLedgerPath = path;
+    const pricedModel = config.models.find((model) => model.id === "openai/gpt-4.1-mini")!;
+    delete pricedModel.outputUsdPerMillionTokens;
+    config.budgets = [
+      {
+        id: "money-needs-output-price",
+        window: "per-request",
+        mode: "hard",
+        scope: { modelAlias: "coding" },
+        maxUsd: 0.01,
+      },
+    ];
+
+    let thrown: unknown;
+    try {
+      await createChatCompletion(
+        {
+          config,
+          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+          fetchImpl: async () =>
+            jsonResponse({
+              choices: [{ index: 0, message: { role: "assistant", content: "unpriced output" }, finish_reason: "stop" }],
+              usage: { prompt_tokens: 1, completion_tokens: 1_000_000, total_tokens: 1_000_001 },
+            }),
+        },
+        {
+          model: "coding",
+          messages: [{ role: "user", content: "hi" }],
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(GatewayHttpError);
+    expect(thrown).toMatchObject({ status: 402, code: "budget_exceeded" });
+    await unlink(path);
+  });
+
   test("turns streaming usage that exceeds a hard budget into a stream error and records spend", async () => {
     const path = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.jsonl`;
     const config = testConfig();
@@ -262,6 +304,54 @@ describe("gateway budgets", () => {
     expect(streamText).toContain('"code":"budget_exceeded"');
     const ledgerText = await Bun.file(path).text();
     expect(ledgerText).toContain('"totalTokens":2');
+    await unlink(path);
+  });
+
+  test("requests streaming usage and fails closed when a hard-budget stream omits usage", async () => {
+    const path = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.jsonl`;
+    const config = testConfig();
+    config.storage.usageLedgerPath = path;
+    config.budgets = [
+      {
+        id: "stream-needs-usage",
+        window: "per-request",
+        mode: "hard",
+        scope: { modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    let providerBody: Record<string, unknown> = {};
+    const response = await createChatCompletionStream(
+      {
+        config,
+        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        fetchImpl: async (_input, init) => {
+          providerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(
+            [
+              'data: {"id":"chunk","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+              "data: [DONE]",
+              "",
+            ].join("\n\n"),
+            { headers: { "content-type": "text/event-stream" } },
+          );
+        },
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      },
+    );
+
+    const streamText = await response.text();
+    expect(providerBody.stream_options).toEqual({ include_usage: true });
+    expect(streamText).toContain('"type":"gateway_budget_error"');
+    expect(streamText).toContain('"code":"budget_usage_missing"');
+    const ledgerText = await Bun.file(path).text();
+    expect(ledgerText).toContain('"status":"error"');
+    expect(ledgerText).toContain('"errorCode":"budget_usage_missing"');
     await unlink(path);
   });
 });

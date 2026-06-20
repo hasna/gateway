@@ -41,4 +41,18 @@ describe("usage normalization", () => {
       }),
     ).toBe(0.0012);
   });
+
+  test("returns unknown cost when a used token side has no configured price", () => {
+    const usage = normalizeUsage({ prompt_tokens: 1, completion_tokens: 1_000_000, total_tokens: 1_000_001 });
+    expect(
+      estimateCostUsd(usage, {
+        id: "partial/model",
+        providerId: "partial",
+        providerModel: "model",
+        aliases: [],
+        capabilities: ["chat"],
+        inputUsdPerMillionTokens: 0.4,
+      }),
+    ).toBeUndefined();
+  });
 });

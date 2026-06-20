@@ -133,8 +133,8 @@ export function transformOpenAICompatibleStream(response: Response, options: Str
 
       async function completeOnce(result: StreamCompletionResult): Promise<void> {
         if (completed) return;
-        completed = true;
         await options.onComplete?.(result);
+        completed = true;
       }
 
       async function failStream(errorPayload: string, result: StreamCompletionResult): Promise<void> {
@@ -146,6 +146,21 @@ export function transformOpenAICompatibleStream(response: Response, options: Str
         }
         await completeOnce(result);
         closeOnce();
+      }
+
+      async function completeSuccessBeforeDone(): Promise<boolean> {
+        try {
+          await completeOnce({ status: "success", rawUsage });
+          return true;
+        } catch (error) {
+          const details = streamErrorDetails(error);
+          await failStream(gatewayStreamError(error), {
+            status: "error",
+            errorType: details.type,
+            errorCode: details.code,
+          });
+          return false;
+        }
       }
 
       async function enqueuePayload(payload: string): Promise<void> {
@@ -178,6 +193,8 @@ export function transformOpenAICompatibleStream(response: Response, options: Str
 
         if (normalized.done) {
           if (!doneSent) {
+            const completedOk = await completeSuccessBeforeDone();
+            if (!completedOk) return;
             controller.enqueue(encoder.encode(doneFrame));
             doneSent = true;
           }
@@ -214,8 +231,13 @@ export function transformOpenAICompatibleStream(response: Response, options: Str
             if (doneSent) break;
           }
         }
-        if (!doneSent) controller.enqueue(encoder.encode(doneFrame));
-        if (!streamFailed) await completeOnce({ status: "success", rawUsage });
+        if (!doneSent) {
+          const completedOk = await completeSuccessBeforeDone();
+          if (completedOk) {
+            controller.enqueue(encoder.encode(doneFrame));
+            doneSent = true;
+          }
+        }
         closeOnce();
       } catch (error) {
         streamFailed = true;

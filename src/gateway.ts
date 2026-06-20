@@ -55,6 +55,21 @@ function includeGatewayMetadata(options: GatewayRuntimeOptions, request: OpenAIC
   return request.gateway?.include_gateway_metadata ?? options.config.server.includeGatewayMetadata;
 }
 
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function requestWithStreamingUsage(request: OpenAIChatCompletionRequest): OpenAIChatCompletionRequest {
+  return {
+    ...request,
+    stream: true,
+    stream_options: {
+      ...objectRecord(request.stream_options),
+      include_usage: true,
+    },
+  };
+}
+
 function extractProviderMessage(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") return undefined;
   const record = payload as Record<string, unknown>;
@@ -273,18 +288,24 @@ export async function createChatCompletionStream(
     const started = Date.now();
     let response: Response;
     const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
+    let hardBudgetRequiresUsage = false;
     try {
-      await assertBudgetPreflight(options.config, budgetContext);
-      response = await openProviderStream(options, request, candidate);
+      const budgetStatuses = await assertBudgetPreflight(options.config, budgetContext);
+      const budgetedRequest = budgetStatuses.length > 0 ? requestWithStreamingUsage(request) : request;
+      hardBudgetRequiresUsage = budgetStatuses.some((status) => status.budget.mode === "hard");
+      response = await openProviderStream(options, budgetedRequest, candidate);
     } catch (error) {
-      lastError = new GatewayHttpError({
-        status: 502,
-        type: "provider_unavailable",
-        code: "provider_fetch_failed",
-        message: error instanceof Error ? error.message : "Provider stream failed.",
-        retryable: true,
-        provider: candidate.provider.id,
-      });
+      lastError =
+        error instanceof GatewayHttpError
+          ? error
+          : new GatewayHttpError({
+              status: 502,
+              type: "provider_unavailable",
+              code: "provider_fetch_failed",
+              message: error instanceof Error ? error.message : "Provider stream failed.",
+              retryable: true,
+              provider: candidate.provider.id,
+            });
       route.decision.attempts.push({
         provider: candidate.provider.id,
         model: candidate.model.id,
@@ -293,10 +314,11 @@ export async function createChatCompletionStream(
         reason: lastError.message,
         errorType: lastError.type,
         errorCode: lastError.code,
-        retryable: true,
+        retryable: lastError.retryable,
         latencyMs: Date.now() - started,
       });
-      continue;
+      if (lastError.retryable) continue;
+      throw lastError;
     }
     const latencyMs = Date.now() - started;
 
@@ -368,6 +390,15 @@ export async function createChatCompletionStream(
       },
       onComplete: async (result) => {
         if (streamBudgetAccounted) return;
+        if (result.status === "success" && result.rawUsage === undefined && hardBudgetRequiresUsage) {
+          throw new GatewayHttpError({
+            status: 402,
+            type: "gateway_budget_error",
+            code: "budget_usage_missing",
+            message: "Provider stream did not include usage required to enforce a hard budget.",
+            raw: { context: budgetContext },
+          });
+        }
         await accountStreamingUsage(result.rawUsage, result.status, result.errorType, result.errorCode);
       },
     });
