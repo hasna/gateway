@@ -1,4 +1,5 @@
 import { gatewayErrorResponse, GatewayHttpError, jsonError } from "./errors";
+import { fingerprintGatewayKey } from "./budget";
 import { createChatCompletion, createChatCompletionStream } from "./gateway";
 import type { GatewayConfig, GatewayFetch, GatewayRuntimeOptions, OpenAIChatCompletionRequest } from "./types";
 import { gatewayVersion } from "./version";
@@ -187,11 +188,18 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
 
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         const body = validateChatRequest(await parseJsonBody(request, options.config.server.maxRequestBodyBytes));
+        const runtimeWithRequestContext: GatewayRuntimeOptions = {
+          ...runtime,
+          budgetContext: {
+            gatewayKey: fingerprintGatewayKey(bearerToken(request)),
+            tenant: request.headers.get("x-gateway-tenant") ?? undefined,
+          },
+        };
         if (body.stream) {
-          return await createChatCompletionStream(runtime, body);
+          return await createChatCompletionStream(runtimeWithRequestContext, body);
         }
 
-        const result = await createChatCompletion(runtime, body);
+        const result = await createChatCompletion(runtimeWithRequestContext, body);
         return json(result.body, result.status);
       }
 

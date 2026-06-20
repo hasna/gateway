@@ -3,6 +3,7 @@ import { modelPresets, providerPresets } from "./presets";
 import { z } from "zod";
 import type {
   GatewayAuthConfig,
+  GatewayBudgetConfig,
   GatewayConfig,
   GatewayConfigInput,
   GatewayConfigValidationResult,
@@ -52,6 +53,29 @@ const authSchema = z
 const storageSchema = z
   .object({
     usageLedgerPath: z.string().min(1).optional(),
+  })
+  .passthrough();
+
+const budgetScopeSchema = z
+  .object({
+    gatewayKey: z.string().min(1).optional(),
+    tenant: z.string().min(1).optional(),
+    modelAlias: z.string().min(1).optional(),
+  })
+  .passthrough();
+
+const budgetSchema = z
+  .object({
+    id: z.string().min(1),
+    scope: budgetScopeSchema.optional(),
+    window: z.enum(["per-request", "daily", "monthly", "lifetime"]),
+    mode: z.enum(["hard", "soft"]).default("hard"),
+    maxUsd: z.number().min(0).optional(),
+    maxInputTokens: z.number().int().min(0).optional(),
+    maxOutputTokens: z.number().int().min(0).optional(),
+    maxTotalTokens: z.number().int().min(0).optional(),
+    warningThreshold: z.number().min(0).max(1).optional(),
+    resetAt: z.string().min(1).optional(),
   })
   .passthrough();
 
@@ -110,6 +134,7 @@ const gatewayConfigInputSchema = z
     providers: z.array(providerSchema).optional(),
     models: z.array(modelSchema).optional(),
     routes: z.array(routeSchema).optional(),
+    budgets: z.array(budgetSchema).optional(),
     presets: z.array(z.string().min(1)).optional(),
   })
   .passthrough();
@@ -136,6 +161,14 @@ const defaultPolicy: GatewayGlobalPolicy = {
   allowChineseProviders: false,
   byokOnly: true,
 };
+
+function normalizeBudget(budget: GatewayBudgetConfig): GatewayBudgetConfig {
+  return {
+    ...budget,
+    mode: budget.mode ?? "hard",
+    scope: budget.scope ?? {},
+  };
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -304,6 +337,7 @@ export function normalizeConfig(input: GatewayConfigInput): GatewayConfig {
     providers: expanded.providers,
     models: expanded.models,
     routes: input.routes ?? [],
+    budgets: (input.budgets ?? []).map(normalizeBudget),
   };
 }
 
@@ -389,6 +423,25 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
     }
     for (const modelId of route.fallbackModelIds ?? []) {
       if (!modelIds.has(modelId)) errors.push(`route ${route.id} references unknown fallback model '${modelId}'.`);
+    }
+  }
+
+  const budgetIds = new Set<string>();
+  for (const budget of config.budgets) {
+    assertString(budget.id, "budget.id", errors);
+    assertString(budget.window, `budget ${budget.id}.window`, errors);
+    assertString(budget.mode, `budget ${budget.id}.mode`, errors);
+    if (budgetIds.has(budget.id)) {
+      errors.push(`budget id '${budget.id}' is duplicated.`);
+    }
+    budgetIds.add(budget.id);
+    if (
+      budget.maxUsd === undefined &&
+      budget.maxInputTokens === undefined &&
+      budget.maxOutputTokens === undefined &&
+      budget.maxTotalTokens === undefined
+    ) {
+      errors.push(`budget ${budget.id} must define at least one money or token limit.`);
     }
   }
 

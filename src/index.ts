@@ -14,6 +14,16 @@ export { createGatewayHandler, startGatewayServer } from "./server";
 export { runAvailableProviderSmokeChecks, runLiveSmokeCheck } from "./smoke";
 export { transformOpenAICompatibleStream } from "./streaming";
 export { estimateCostUsd, normalizeUsage, toOpenAIUsage } from "./usage";
+export {
+  assertBudgetPostflight,
+  assertBudgetPreflight,
+  budgetContextFromRequest,
+  evaluateBudgetPostflight,
+  fingerprintGatewayKey,
+  getBudgetStatuses,
+  spendFromUsage,
+} from "./budget";
+export type { GatewayBudgetContext, GatewayBudgetSpend, GatewayBudgetStatus } from "./budget";
 export { gatewayVersion } from "./version";
 export type {
   ChatMessage,

@@ -98,6 +98,29 @@ export type GatewayStorageConfig = {
   usageLedgerPath?: string;
 };
 
+export type GatewayBudgetWindow = "per-request" | "daily" | "monthly" | "lifetime";
+
+export type GatewayBudgetMode = "hard" | "soft";
+
+export type GatewayBudgetScope = {
+  gatewayKey?: string;
+  tenant?: string;
+  modelAlias?: string;
+};
+
+export type GatewayBudgetConfig = {
+  id: string;
+  scope?: GatewayBudgetScope;
+  window: GatewayBudgetWindow;
+  mode: GatewayBudgetMode;
+  maxUsd?: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  maxTotalTokens?: number;
+  warningThreshold?: number;
+  resetAt?: string;
+};
+
 export type GatewayConfig = {
   server: GatewayServerConfig;
   auth: GatewayAuthConfig;
@@ -106,6 +129,7 @@ export type GatewayConfig = {
   providers: GatewayProviderConfig[];
   models: GatewayModelConfig[];
   routes: GatewayRoutePolicy[];
+  budgets: GatewayBudgetConfig[];
 };
 
 export type GatewayConfigInput = Partial<GatewayConfig> & {
@@ -137,6 +161,7 @@ export type GatewayRequestOptions = {
   allow_logging?: boolean;
   zero_data_retention_required?: boolean;
   byok_only?: boolean;
+  tenant?: string;
   max_input_usd_per_million_tokens?: number;
   max_output_usd_per_million_tokens?: number;
   include_gateway_metadata?: boolean;
@@ -278,4 +303,8 @@ export type GatewayRuntimeOptions = {
   config: GatewayConfig;
   env?: Record<string, string | undefined>;
   fetchImpl?: GatewayFetch;
+  budgetContext?: {
+    gatewayKey?: string;
+    tenant?: string;
+  };
 };

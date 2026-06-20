@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { loadGatewayConfig, validateConfig, validateRuntimeSecrets } from "../config";
+import { getBudgetStatuses } from "../budget";
 import type { GatewayConfigInput } from "../types";
 import { runAvailableProviderSmokeChecks, runLiveSmokeCheck } from "../smoke";
 import { startGatewayServer } from "../server";
@@ -7,6 +8,7 @@ import { gatewayVersion } from "../version";
 
 type ParsedArgs = {
   command: string;
+  args: string[];
   flags: Record<string, string | boolean>;
 };
 
@@ -16,7 +18,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
-    if (!arg.startsWith("--")) continue;
+    if (!arg.startsWith("--")) {
+      flags[index.toString()] = arg;
+      continue;
+    }
     const key = arg.slice(2);
     const next = rest[index + 1];
     if (!next || next.startsWith("--")) {
@@ -27,7 +32,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { command, flags };
+  return { command, args: rest.filter((arg) => !arg.startsWith("--")), flags };
 }
 
 function flagString(flags: Record<string, string | boolean>, key: string, fallback: string): string {
@@ -42,6 +47,38 @@ function flagNumber(flags: Record<string, string | boolean>, key: string, fallba
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function optionalFlagString(flags: Record<string, string | boolean>, key: string): string | undefined {
+  const value = flags[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalFlagNumber(flags: Record<string, string | boolean>, key: string): number | undefined {
+  const value = flags[key];
+  if (typeof value !== "string") return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`--${key} must be a non-negative number.`);
+  }
+  return parsed;
+}
+
+async function readRawConfig(path: string): Promise<GatewayConfigInput> {
+  return JSON.parse(await Bun.file(path).text()) as GatewayConfigInput;
+}
+
+async function writeRawConfig(path: string, config: GatewayConfigInput): Promise<void> {
+  const result = validateConfig(config);
+  if (!result.ok) {
+    throw new Error(result.errors.join(" "));
+  }
+  await Bun.write(path, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function printJsonOrText(value: unknown, flags: Record<string, string | boolean>, textValue: string): void {
+  if (flags.json) console.log(JSON.stringify(value, null, 2));
+  else console.log(textValue);
+}
+
 function help(): string {
   return `Hasna Gateway ${gatewayVersion}
 
@@ -50,6 +87,10 @@ Usage:
   gateway validate --config gateway.config.json
   gateway smoke --config gateway.config.json [--model fast]
   gateway smoke --config gateway.config.json --all
+  gateway budget-add --config gateway.config.json --id daily --window daily [--tenant acme] [--model coding] [--max-usd 1] [--max-total-tokens 100000]
+  gateway budget-list --config gateway.config.json [--json]
+  gateway budget-remaining --config gateway.config.json [--id daily] [--json]
+  gateway budget-reset --config gateway.config.json --id daily
   gateway help
 `;
 }
@@ -60,6 +101,80 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
 
   if (parsed.command === "help" || parsed.flags.help) {
     console.log(help());
+    return;
+  }
+
+  if (parsed.command === "budget-add") {
+    const raw = await readRawConfig(configPath);
+    const budget = {
+      id: flagString(parsed.flags, "id", ""),
+      window: flagString(parsed.flags, "window", "lifetime") as "per-request" | "daily" | "monthly" | "lifetime",
+      mode: flagString(parsed.flags, "mode", "hard") as "hard" | "soft",
+      scope: {
+        ...(optionalFlagString(parsed.flags, "gateway-key") ? { gatewayKey: optionalFlagString(parsed.flags, "gateway-key") } : {}),
+        ...(optionalFlagString(parsed.flags, "tenant") ? { tenant: optionalFlagString(parsed.flags, "tenant") } : {}),
+        ...(optionalFlagString(parsed.flags, "model") ? { modelAlias: optionalFlagString(parsed.flags, "model") } : {}),
+      },
+      ...(optionalFlagNumber(parsed.flags, "max-usd") === undefined
+        ? {}
+        : { maxUsd: optionalFlagNumber(parsed.flags, "max-usd") }),
+      ...(optionalFlagNumber(parsed.flags, "max-input-tokens") === undefined
+        ? {}
+        : { maxInputTokens: optionalFlagNumber(parsed.flags, "max-input-tokens") }),
+      ...(optionalFlagNumber(parsed.flags, "max-output-tokens") === undefined
+        ? {}
+        : { maxOutputTokens: optionalFlagNumber(parsed.flags, "max-output-tokens") }),
+      ...(optionalFlagNumber(parsed.flags, "max-total-tokens") === undefined
+        ? {}
+        : { maxTotalTokens: optionalFlagNumber(parsed.flags, "max-total-tokens") }),
+      ...(optionalFlagNumber(parsed.flags, "warning-threshold") === undefined
+        ? {}
+        : { warningThreshold: optionalFlagNumber(parsed.flags, "warning-threshold") }),
+    };
+    if (!budget.id) throw new Error("--id is required.");
+    raw.budgets = [...(raw.budgets ?? []).filter((item) => item.id !== budget.id), budget];
+    await writeRawConfig(configPath, raw);
+    printJsonOrText({ budget }, parsed.flags, `Budget ${budget.id} saved.`);
+    return;
+  }
+
+  if (parsed.command === "budget-list") {
+    const config = await loadGatewayConfig(configPath);
+    printJsonOrText(config.budgets, parsed.flags, config.budgets.map((budget) => budget.id).join("\n") || "No budgets configured.");
+    return;
+  }
+
+  if (parsed.command === "budget-remaining") {
+    const config = await loadGatewayConfig(configPath);
+    const statuses = await getBudgetStatuses(
+      config,
+      {
+        tenant: optionalFlagString(parsed.flags, "tenant"),
+        requestedModel: optionalFlagString(parsed.flags, "model"),
+      },
+      { budgetId: optionalFlagString(parsed.flags, "id") },
+    );
+    printJsonOrText(
+      statuses,
+      parsed.flags,
+      statuses
+        .map((status) => `${status.budget.id}: ${JSON.stringify(status.remaining)}`)
+        .join("\n") || "No matching budgets.",
+    );
+    return;
+  }
+
+  if (parsed.command === "budget-reset") {
+    const raw = await readRawConfig(configPath);
+    const id = flagString(parsed.flags, "id", "");
+    if (!id) throw new Error("--id is required.");
+    const budgets = raw.budgets ?? [];
+    const budget = budgets.find((item) => item.id === id);
+    if (!budget) throw new Error(`Budget not found: ${id}`);
+    budget.resetAt = new Date().toISOString();
+    raw.budgets = budgets;
+    await writeRawConfig(configPath, raw);
+    printJsonOrText({ budget }, parsed.flags, `Budget ${id} reset.`);
     return;
   }
 

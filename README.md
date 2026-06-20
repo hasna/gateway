@@ -12,6 +12,7 @@ The open-source package is useful on its own. Anyone can run it locally or on th
 - Routing by model alias, provider allowlist/blocklist, region policy, price ceilings, fallback, and capability.
 - Explicit China/provider policy so requests are never silently routed to a region or provider class the caller did not allow.
 - Usage normalization, estimated cost hooks, route decision metadata, and optional local JSONL usage ledger.
+- Hard or soft budgets by gateway key, tenant, and model alias across USD plus input/output/total tokens.
 - Local-first defaults: no hosted Hasna calls unless explicitly configured.
 
 ## Quick Start
@@ -47,6 +48,8 @@ bun run build
 bun dist/cli/index.js validate --config gateway.config.example.json
 bun dist/cli/index.js smoke --config gateway.config.example.json --model fast
 bun dist/cli/index.js smoke --config gateway.config.example.json --all
+bun dist/cli/index.js budget-add --config gateway.config.json --id team-daily --window daily --tenant acme --model fast --max-usd 5 --max-total-tokens 100000
+bun dist/cli/index.js budget-remaining --config gateway.config.json --id team-daily --json
 ```
 
 After installation as a package, the CLI binary is `gateway`:
@@ -64,6 +67,8 @@ Required config examples:
 - `gateway.config.china.example.json`: Chinese provider routes with explicit `cn`/`sg` allowance.
 
 Provider keys are loaded from environment variables only. Do not put provider secrets in config files.
+
+Budgets live in the same JSON config and spend is calculated from the local usage ledger. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
 
 ## Documentation
 

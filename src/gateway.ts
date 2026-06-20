@@ -1,5 +1,12 @@
 import { GatewayHttpError, providerErrorToGateway } from "./errors";
 import { appendUsageLedger } from "./ledger";
+import {
+  assertBudgetPostflight,
+  assertBudgetPreflight,
+  budgetContextFromRequest,
+  evaluateBudgetPostflight,
+  spendFromUsage,
+} from "./budget";
 import { adapterForProvider } from "./providers";
 import { resolveRoute } from "./router";
 import { transformOpenAICompatibleStream } from "./streaming";
@@ -21,6 +28,7 @@ function metadataFor(
   candidate: GatewayRouteCandidate,
   decision: GatewayRouteDecision,
   estimatedCostUsd: number | undefined,
+  budgets?: Awaited<ReturnType<typeof evaluateBudgetPostflight>>,
 ): Record<string, unknown> {
   return {
     provider: candidate.provider.id,
@@ -28,6 +36,16 @@ function metadataFor(
     route_mode: decision.mode,
     attempts: decision.attempts.filter((attempt) => attempt.status !== "skipped").length || 1,
     ...(estimatedCostUsd === undefined ? {} : { estimated_cost_usd: estimatedCostUsd }),
+    ...(budgets && budgets.length > 0
+      ? {
+          budgets: budgets.map((status) => ({
+            id: status.budget.id,
+            mode: status.budget.mode,
+            remaining: status.remaining,
+            warnings: status.warnings,
+          })),
+        }
+      : {}),
     route_decision: decision,
   };
 }
@@ -121,13 +139,17 @@ export async function createChatCompletion(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
 ): Promise<CompletionResult> {
+  const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
+  await assertBudgetPreflight(options.config, requestBudgetContext);
   const route = resolveRoute(options, request);
   const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
   let lastError: GatewayHttpError | undefined;
 
   for (const candidate of route.candidates.slice(0, maxAttempts)) {
     const started = Date.now();
+    const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     try {
+      await assertBudgetPreflight(options.config, budgetContext);
       const response = await callProvider(options, request, candidate);
       const latencyMs = Date.now() - started;
 
@@ -162,6 +184,11 @@ export async function createChatCompletion(
       const rawUsage = providerJson.usage;
       const usage = normalizeUsage(rawUsage);
       const estimatedCostUsd = estimateCostUsd(usage, candidate.model);
+      const budgets = await evaluateBudgetPostflight(
+        options.config,
+        budgetContext,
+        spendFromUsage(usage, estimatedCostUsd),
+      );
       const body: Record<string, unknown> = {
         ...providerJson,
         id: providerJson.id ?? `chatcmpl_gateway_${crypto.randomUUID()}`,
@@ -172,7 +199,7 @@ export async function createChatCompletion(
       };
 
       if (includeGatewayMetadata(options, request)) {
-        body.gateway = metadataFor(candidate, route.decision, estimatedCostUsd);
+        body.gateway = metadataFor(candidate, route.decision, estimatedCostUsd, budgets);
       }
 
       await appendUsageLedger({
@@ -180,11 +207,14 @@ export async function createChatCompletion(
         provider: candidate.provider,
         model: candidate.model,
         decision: route.decision,
+        context: budgetContext,
         usage,
         estimatedCostUsd,
+        budgets,
         status: "success",
       });
 
+      assertBudgetPostflight(budgets);
       return { body, status: 200, decision: route.decision };
     } catch (error) {
       const gatewayError =
@@ -233,6 +263,8 @@ export async function createChatCompletionStream(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
 ): Promise<Response> {
+  const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
+  await assertBudgetPreflight(options.config, requestBudgetContext);
   const route = resolveRoute(options, request);
   const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
   let lastError: GatewayHttpError | undefined;
@@ -240,7 +272,9 @@ export async function createChatCompletionStream(
   for (const candidate of route.candidates.slice(0, maxAttempts)) {
     const started = Date.now();
     let response: Response;
+    const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     try {
+      await assertBudgetPreflight(options.config, budgetContext);
       response = await openProviderStream(options, request, candidate);
     } catch (error) {
       lastError = new GatewayHttpError({
@@ -300,13 +334,21 @@ export async function createChatCompletionStream(
       includeGatewayMetadata: includeGatewayMetadata(options, request),
       onComplete: async (result) => {
         const usage = result.rawUsage === undefined ? undefined : normalizeUsage(result.rawUsage);
+        const estimatedCostUsd = usage ? estimateCostUsd(usage, candidate.model) : undefined;
+        const budgets = await evaluateBudgetPostflight(
+          options.config,
+          budgetContext,
+          spendFromUsage(usage, estimatedCostUsd),
+        );
         await appendUsageLedger({
           config: options.config,
           provider: candidate.provider,
           model: candidate.model,
           decision: route.decision,
+          context: budgetContext,
           usage,
-          estimatedCostUsd: usage ? estimateCostUsd(usage, candidate.model) : undefined,
+          estimatedCostUsd,
+          budgets,
           status: result.status,
           errorType: result.errorType,
           errorCode: result.errorCode,
