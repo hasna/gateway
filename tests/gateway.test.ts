@@ -97,4 +97,78 @@ describe("chat completion lifecycle", () => {
     expect(callCount).toBe(2);
     expect((result.body.gateway as Record<string, unknown>).provider).toBe("openai");
   });
+
+  test("forwards effective route policy to OpenRouter option mapping", async () => {
+    const config = testConfig();
+    config.providers.push({
+      id: "openrouter",
+      displayName: "OpenRouter",
+      kind: "openai-compatible",
+      baseUrl: "https://openrouter.test/api/v1",
+      apiKeyEnv: "OPENROUTER_API_KEY",
+      enabled: true,
+      regions: ["global"],
+      dataPolicy: {
+        allowTraining: false,
+        allowLogging: false,
+        byokOnly: true,
+        zeroDataRetentionAvailable: true,
+      },
+    });
+    config.models.push({
+      id: "openrouter/auto",
+      providerId: "openrouter",
+      providerModel: "openrouter/auto",
+      aliases: ["or-auto"],
+      capabilities: ["chat", "streaming", "tools", "json"],
+    });
+    config.routes.push({
+      id: "or-auto",
+      mode: "fallback",
+      modelAliases: ["or-auto"],
+      fallbackModelIds: ["openrouter/auto"],
+      dataPolicy: {
+        allowTraining: false,
+        allowLogging: false,
+        zeroDataRetentionRequired: true,
+        allowedRegions: ["global"],
+      },
+    });
+
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.provider).toEqual({
+        zdr: true,
+        data_collection: "deny",
+      });
+      return jsonResponse({
+        id: "provider-id",
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    };
+
+    await createChatCompletion(
+      {
+        config,
+        env: {
+          GATEWAY_API_KEY: "gateway",
+          OPENROUTER_API_KEY: "openrouter",
+        },
+        fetchImpl,
+      },
+      {
+        model: "or-auto",
+        messages: [{ role: "user", content: "hi" }],
+        provider_options: {
+          openrouter: {
+            provider: {
+              zdr: false,
+              data_collection: "allow",
+            },
+          },
+        },
+      },
+    );
+  });
 });

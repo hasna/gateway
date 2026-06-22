@@ -1,5 +1,6 @@
 import { GatewayHttpError } from "./errors";
 import { modelPresets, providerPresets } from "./presets";
+import { providerCredentialEnv, providerRequiresCredential } from "./provider-config";
 import { z } from "zod";
 import type {
   GatewayAuthConfig,
@@ -79,6 +80,27 @@ const budgetSchema = z
   })
   .passthrough();
 
+const providerAuthSchema = z
+  .object({
+    type: z.enum(["bearer", "header", "none"]).optional(),
+    apiKeyEnv: z.string().min(1).optional(),
+    headerName: z.string().min(1).optional(),
+    prefix: z.string().optional(),
+  })
+  .passthrough();
+
+const providerHeaderValueSchema = z.union([
+  z.string(),
+  z
+    .object({
+      value: z.string().optional(),
+      env: z.string().min(1).optional(),
+      prefix: z.string().optional(),
+      required: z.boolean().optional(),
+    })
+    .passthrough(),
+]);
+
 const providerSchema = z
   .object({
     id: z.string().min(1),
@@ -87,7 +109,10 @@ const providerSchema = z
       .enum(["openai-compatible", "openai", "anthropic", "google", "bedrock", "vertex", "openrouter"])
       .default("openai-compatible"),
     baseUrl: z.string().url().optional(),
+    baseUrlEnv: z.string().min(1).optional(),
     apiKeyEnv: z.string().min(1).optional(),
+    auth: providerAuthSchema.optional(),
+    headers: z.record(providerHeaderValueSchema).optional(),
     enabled: z.boolean().optional(),
     regions: z.array(z.string().min(1)).optional(),
     jurisdiction: z.string().min(1).optional(),
@@ -107,13 +132,17 @@ const modelSchema = z
     contextWindow: z.number().int().min(1).optional(),
     inputUsdPerMillionTokens: z.number().min(0).optional(),
     outputUsdPerMillionTokens: z.number().min(0).optional(),
+    qualityScore: z.number().min(0).max(1).optional(),
+    averageLatencyMs: z.number().min(1).optional(),
+    successRate: z.number().min(0).max(1).optional(),
+    throughputTokensPerSecond: z.number().min(0).optional(),
   })
   .passthrough();
 
 const routeSchema = z
   .object({
     id: z.string().min(1),
-    mode: z.enum(["explicit", "fallback", "cheapest", "lowest-latency", "highest-throughput", "balanced"]),
+    mode: z.enum(["explicit", "fallback", "cheapest", "lowest-latency", "highest-throughput", "balanced", "smart"]),
     modelAliases: z.array(z.string().min(1)).optional(),
     providerAllowlist: z.array(z.string().min(1)).optional(),
     providerBlocklist: z.array(z.string().min(1)).optional(),
@@ -383,11 +412,11 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
     assertString(provider.id, "provider.id", errors);
     assertString(provider.displayName, `provider ${provider.id}.displayName`, errors);
     assertString(provider.kind, `provider ${provider.id}.kind`, errors);
-    if (!provider.baseUrl) {
-      errors.push(`provider ${provider.id} must define baseUrl.`);
+    if (!provider.baseUrl && !provider.baseUrlEnv) {
+      errors.push(`provider ${provider.id} must define baseUrl or baseUrlEnv.`);
     }
-    if (!provider.apiKeyEnv) {
-      warnings.push(`provider ${provider.id} does not define apiKeyEnv and will not be callable.`);
+    if (providerRequiresCredential(provider) && !providerCredentialEnv(provider)) {
+      warnings.push(`provider ${provider.id} does not define apiKeyEnv/auth.apiKeyEnv and will not be callable.`);
     }
     if (providerIds.has(provider.id)) {
       errors.push(`provider id '${provider.id}' is duplicated.`);
@@ -529,8 +558,10 @@ export function validateRuntimeSecrets(config: GatewayConfig, env: Record<string
   }
 
   const hasCallableProvider = config.providers.some((provider) => {
-    if (provider.enabled === false || !provider.apiKeyEnv) return false;
-    return Boolean(env[provider.apiKeyEnv]);
+    if (provider.enabled === false) return false;
+    const credentialEnv = providerCredentialEnv(provider);
+    if (!providerRequiresCredential(provider)) return true;
+    return Boolean(credentialEnv && env[credentialEnv]);
   });
 
   if (!hasCallableProvider) {

@@ -8,6 +8,13 @@ export {
 export { GatewayHttpError, gatewayErrorResponse, jsonError } from "./errors";
 export { createChatCompletion, createChatCompletionStream } from "./gateway";
 export { appendUsageLedger } from "./ledger";
+export {
+  buildProviderHeaders,
+  missingRequiredProviderHeaderEnvs,
+  providerBaseUrl,
+  providerCredentialEnv,
+  providerRequiresCredential,
+} from "./provider-config";
 export { modelPresets, providerPresets } from "./presets";
 export { resolveRoute } from "./router";
 export { createGatewayHandler, startGatewayServer } from "./server";
@@ -37,11 +44,14 @@ export type {
   GatewayModelCapability,
   GatewayModelConfig,
   GatewayProviderConfig,
+  GatewayProviderAuthConfig,
+  GatewayProviderHeaderValue,
   GatewayProviderKind,
   GatewayRequestOptions,
   GatewayRouteAttempt,
   GatewayRouteCandidate,
   GatewayRouteDecision,
+  GatewayRouteScore,
   GatewayRoutePolicy,
   GatewayRoutingMode,
   GatewayRuntimeOptions,

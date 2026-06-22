@@ -29,9 +29,21 @@ The first implementation should prioritize a small working gateway over broad in
 - Config validation.
 - Model aliases.
 - Fallback routing.
+- Smart cost/quality/latency routing.
 - Explicit provider policy.
+- Config-driven provider auth and headers.
 - Streaming.
 - Usage normalization.
 - Tests.
 
-Provider breadth should come after the request lifecycle is reliable.
+Provider breadth should stay on the generic OpenAI-compatible adapter when the upstream gateway uses standard chat completions plus headers or documented request-body provider options.
+
+## Gateway Examples
+
+- [OpenRouter Auto Router](../examples/openrouter-auto/README.md)
+- [Vercel AI Gateway](../examples/vercel-ai-gateway/README.md)
+- [Portkey AI Gateway](../examples/portkey/README.md)
+- [Cloudflare AI Gateway](../examples/cloudflare-ai-gateway/README.md)
+- [LiteLLM Proxy](../examples/litellm-proxy/README.md)
+- [Helicone AI Gateway](../examples/helicone-ai-gateway/README.md)
+- [Kong AI Gateway](../examples/kong-ai-gateway/README.md)

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { interpolateEnvPlaceholders, validateConfig } from "../src/config";
+import { interpolateEnvPlaceholders, validateConfig, validateRuntimeSecrets } from "../src/config";
 import { testConfig } from "./helpers";
 
 describe("config validation", () => {
@@ -141,6 +141,92 @@ describe("config validation", () => {
     if (result.ok) {
       expect(result.config.providers[0]?.dataPolicy).not.toHaveProperty("hostedAllowed");
       expect(result.config.providers[0]?.dataPolicy?.zeroDataRetentionAvailable).toBe(true);
+    }
+  });
+
+  test("accepts baseUrlEnv, custom auth, and env-derived provider headers", () => {
+    const result = validateConfig({
+      providers: [
+        {
+          id: "portkey",
+          displayName: "Portkey",
+          kind: "openai-compatible",
+          baseUrlEnv: "PORTKEY_BASE_URL",
+          auth: {
+            type: "header",
+            apiKeyEnv: "PORTKEY_API_KEY",
+            headerName: "x-portkey-api-key",
+            prefix: "",
+          },
+          headers: {
+            "x-portkey-config": { env: "PORTKEY_CONFIG_ID" },
+          },
+          dataPolicy: { allowTraining: false, allowLogging: true, byokOnly: true },
+        },
+      ],
+      models: [
+        {
+          id: "portkey/test",
+          providerId: "portkey",
+          providerModel: "openai/gpt-4.1-mini",
+          capabilities: ["chat"],
+          qualityScore: 0.8,
+          averageLatencyMs: 1000,
+          successRate: 0.99,
+          throughputTokensPerSecond: 80,
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.providers[0]?.baseUrlEnv).toBe("PORTKEY_BASE_URL");
+      expect(result.config.providers[0]?.auth?.apiKeyEnv).toBe("PORTKEY_API_KEY");
+      expect(result.config.models[0]?.qualityScore).toBe(0.8);
+    }
+  });
+
+  test("runtime secret validation uses auth.apiKeyEnv", () => {
+    const result = validateConfig({
+      auth: {
+        apiKeyEnv: "GATEWAY_API_KEY",
+        required: true,
+      },
+      providers: [
+        {
+          id: "custom",
+          displayName: "Custom",
+          kind: "openai-compatible",
+          baseUrl: "https://custom.test/v1",
+          auth: {
+            type: "header",
+            apiKeyEnv: "CUSTOM_PROVIDER_KEY",
+            headerName: "x-api-key",
+          },
+          dataPolicy: { allowTraining: false, byokOnly: true },
+        },
+      ],
+      models: [
+        {
+          id: "custom/test",
+          providerId: "custom",
+          providerModel: "test",
+          capabilities: ["chat"],
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(validateRuntimeSecrets(result.config, { GATEWAY_API_KEY: "gateway" })).toContain(
+        "At least one enabled provider must have its apiKeyEnv set in the environment.",
+      );
+      expect(
+        validateRuntimeSecrets(result.config, {
+          GATEWAY_API_KEY: "gateway",
+          CUSTOM_PROVIDER_KEY: "provider",
+        }),
+      ).toEqual([]);
     }
   });
 });
