@@ -59,8 +59,11 @@ The router receives a normalized request and eligible model candidates. It choos
 - `lowest-latency`: choose lowest recent p95 or configured latency.
 - `highest-throughput`: choose provider with best recent success and throughput.
 - `balanced`: weighted score from cost, latency, success rate, and quality hints.
+- `smart`: request-tunable scoring across cost, quality, latency, success, context, and capability hints.
 
 Routing should always produce a route decision object that can be logged and tested.
+
+Policy filtering happens before scoring. The router must not let a high score route outside region, data, BYOK, credential, capability, or cost policy.
 
 ### Provider Adapter Layer
 
@@ -129,6 +132,15 @@ Recommended internal modules:
 - `src/storage`: local metrics and usage storage.
 - `src/errors`: provider error taxonomy.
 - `src/sdk`: embeddable TypeScript API.
+
+## open-router Companion
+
+The companion `open-router` repository is intended for reusable prompt-aware routing, provider scoring, and evaluation harnesses. It is currently a companion placeholder, not a package dependency.
+
+The deterministic smart routing layer belongs in `open-gateway` for now because it depends directly on gateway config, data policy, credentials, route metadata, budgets, usage ledger records, and provider attempt accounting. Once `open-router` has reusable package code, the boundary should be:
+
+- `open-gateway`: policy, credentials, budgets, provider attempts, ledger, and OpenAI-compatible HTTP surface.
+- `open-router`: optional prompt-aware scoring/evals that receive already-policy-filtered candidates and return explainable ranking metadata.
 
 ## Existing Hasna Code To Reuse
 

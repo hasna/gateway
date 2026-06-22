@@ -1,6 +1,6 @@
 # Hasna Gateway
 
-Hasna Gateway is the open-source AI gateway core for Hasna apps and self-hosted teams. It exposes one stable OpenAI-compatible API while routing requests across providers, including OpenAI, Google Gemini, OpenRouter, DeepSeek, Qwen/DashScope, Kimi/Moonshot, Z.AI/GLM, and SiliconFlow.
+Hasna Gateway is the open-source AI gateway core for Hasna apps and self-hosted teams. It exposes one stable OpenAI-compatible API while routing requests across providers, including OpenAI, Google Gemini, OpenRouter, Vercel AI Gateway, LiteLLM Proxy, Portkey, Cloudflare AI Gateway, Helicone AI Gateway, Kong AI Gateway, DeepSeek, Qwen/DashScope, Kimi/Moonshot, Z.AI/GLM, and SiliconFlow.
 
 The open-source package is useful on its own. Anyone can run it locally or on their own server, bring their own provider keys, define routing policy, and point applications at one endpoint. The hosted Hasna gateway can build on the same core while keeping accounts, billing, pooled provider contracts, discounts, tenant policy, and hosted observability private.
 
@@ -9,7 +9,7 @@ The open-source package is useful on its own. Anyone can run it locally or on th
 - OpenAI-compatible HTTP API first, starting with `/v1/chat/completions`.
 - One gateway key for clients, many provider keys behind the gateway.
 - Bring-your-own-key mode for self-hosted users.
-- Routing by model alias, provider allowlist/blocklist, region policy, price ceilings, fallback, and capability.
+- Routing by model alias, provider allowlist/blocklist, region policy, price ceilings, fallback, capability, and smart cost/quality/latency hints.
 - Explicit China/provider policy so requests are never silently routed to a region or provider class the caller did not allow.
 - Usage normalization, estimated cost hooks, route decision metadata, and optional local JSONL usage ledger.
 - Hard or soft budgets by gateway key, tenant, and model alias across USD plus input/output/total tokens.
@@ -88,6 +88,28 @@ Required config examples:
 
 Provider keys are loaded from environment variables only. Do not put provider secrets in config files.
 
+Providers can use `baseUrl`, `baseUrlEnv`, `apiKeyEnv`, custom `auth`, and static or env-derived `headers`. This keeps OpenAI-compatible gateways on the generic adapter instead of adding hardcoded adapter forks. The built-in presets include:
+
+- Direct/provider presets: `openai`, `openrouter`, `deepseek`, `qwen`, `kimi`, `zai`, `siliconflow`.
+- Gateway presets: `vercel-ai-gateway`, `litellm-proxy`, `portkey`, `cloudflare-ai-gateway`, `helicone-ai-gateway`, `kong-ai-gateway`.
+
+Smart routing is available with route mode `smart` or request `gateway.routing: "smart"`. It filters by policy first, then scores eligible candidates using configured prices, context, capabilities, quality/latency/success/throughput hints, and deterministic fallback ordering when metrics are missing.
+
+```json
+{
+  "model": "coding",
+  "messages": [{ "role": "user", "content": "Refactor this function." }],
+  "gateway": {
+    "routing": "smart",
+    "priority": "quality",
+    "cost_quality_tradeoff": 3,
+    "required_capabilities": ["tools", "json"],
+    "min_context_tokens": 128000,
+    "sticky_session_id": "thread-123"
+  }
+}
+```
+
 Budgets live in the same JSON config and spend is calculated from the usage ledger. JSONL append through `storage.usageLedgerPath` is the local-first default. Daily, monthly, and lifetime budgets require either `storage.usageLedgerPath` or an explicit `storage.cloud` backend; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
 
 ### Runtime Modes
@@ -104,6 +126,8 @@ Set `runtime.mode` to `production-cloud` when running the gateway behind a cloud
 - `runtime.serviceDiscovery.allowedProviderBaseUrls` can restrict enabled providers to exact provider URL origins.
 
 Production cloud mode does not create DNS, ACM, API Gateway, secrets, provider keys, or cloud infrastructure. Those deployment steps require an operator-owned deployment workflow outside this package.
+
+The companion `open-router` repo is currently documented as the future extraction point for prompt-aware routing and eval harnesses. The deterministic routing implementation lives in this package today because it is tightly coupled to gateway policy, provider config, budgets, attempts, and ledger metadata.
 
 ## Documentation
 

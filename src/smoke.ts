@@ -1,6 +1,7 @@
 import { createChatCompletion } from "./gateway";
 import { redactSensitiveText } from "./errors";
 import { isChinaProvider } from "./presets";
+import { providerCredentialEnv, providerRequiresCredential } from "./provider-config";
 import { resolveRoute } from "./router";
 import type {
   GatewayConfig,
@@ -154,11 +155,12 @@ export async function runAvailableProviderSmokeChecks(input: {
       continue;
     }
 
-    if (!provider.apiKeyEnv || !env[provider.apiKeyEnv]) {
+    const credentialEnv = providerCredentialEnv(provider);
+    if (providerRequiresCredential(provider) && (!credentialEnv || !env[credentialEnv])) {
       results.push({
         status: "skipped",
         provider: provider.id,
-        message: `Provider ${provider.id} skipped because ${provider.apiKeyEnv ?? "apiKeyEnv"} is not set.`,
+        message: `Provider ${provider.id} skipped because ${credentialEnv ?? "apiKeyEnv"} is not set.`,
       });
       continue;
     }
