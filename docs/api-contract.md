@@ -81,7 +81,11 @@ Example:
   ],
   "stream": true,
   "gateway": {
-    "routing": "fallback",
+    "routing": "smart",
+    "priority": "quality",
+    "cost_quality_tradeoff": 3,
+    "required_capabilities": ["tools"],
+    "min_context_tokens": 128000,
     "allowed_providers": ["deepseek", "qwen", "openai"],
     "blocked_regions": ["cn"],
     "max_output_usd_per_million_tokens": 10
@@ -89,7 +93,14 @@ Example:
 }
 ```
 
-The optional `gateway` field is a gateway-specific extension. It should be ignored before forwarding to providers.
+The optional `gateway` field is a gateway-specific extension. It is ignored before forwarding to direct providers. For gateway providers with documented request-body routing controls, Hasna Gateway maps only supported fields:
+
+- OpenRouter: `provider.order`, `only`, `ignore`, `sort`, `max_price`, `allow_fallbacks`, `zdr`, `data_collection`, and Auto Router plugin options such as `allowed_models` and `cost_quality_tradeoff`.
+- Vercel AI Gateway: `providerOptions.gateway.order`, `only`, `caching`, and `providerTimeouts`.
+
+Unsupported gateway-only fields and secrets are stripped.
+
+Smart routing fields include `task`, `priority`, `cost_quality_tradeoff`, `sticky_session_id`, `min_quality`, `min_context_tokens`, `expected_input_tokens`, `required_capabilities`, `provider_order`, `provider_only`, and `provider_ignore`. Policy is applied before scoring.
 
 ## Response Shape
 
@@ -121,7 +132,19 @@ Non-streaming responses should match OpenAI chat completion shape:
     "provider_model": "deepseek-chat",
     "route_mode": "fallback",
     "attempts": 1,
-    "estimated_cost_usd": 0.00012
+    "estimated_cost_usd": 0.00012,
+    "route_decision": {
+      "requested_model": "coding",
+      "selected": "deepseek/deepseek-chat",
+      "scores": [
+        {
+          "provider": "deepseek",
+          "model": "deepseek/deepseek-chat",
+          "score": 0.82,
+          "reason": "highest cost, quality, latency, and success weighted score among eligible models"
+        }
+      ]
+    }
   }
 }
 ```

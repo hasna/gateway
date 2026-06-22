@@ -24,6 +24,18 @@ Recommended open-source env variables:
 - `ANTHROPIC_API_KEY`
 - `GOOGLE_GENERATIVE_AI_API_KEY`
 - `OPENROUTER_API_KEY`
+- `AI_GATEWAY_API_KEY`
+- `LITELLM_PROXY_BASE_URL`
+- `LITELLM_API_KEY`
+- `PORTKEY_API_KEY`
+- `PORTKEY_CONFIG_ID`
+- `PORTKEY_PROVIDER`
+- `PORTKEY_VIRTUAL_KEY`
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_AI_GATEWAY_BASE_URL`
+- `HELICONE_API_KEY`
+- `KONG_AI_GATEWAY_BASE_URL`
+- `KONG_AI_GATEWAY_API_KEY`
 - `DEEPSEEK_API_KEY`
 - `DASHSCOPE_API_KEY`
 - `MOONSHOT_API_KEY`
@@ -69,6 +81,8 @@ Provider policy must be explicit. Important examples:
 - `byok_only: true`
 
 If provider terms, retention, or region are unknown, the gateway should treat the provider as unavailable for restricted routes.
+
+Gateway providers such as Portkey, Cloudflare, Vercel, Helicone, Kong, and LiteLLM may perform their own logging, routing, fallback, billing, or retention. Configure their `dataPolicy` conservatively and only enable them on routes whose logging, region, and BYOK requirements they can satisfy.
 
 ## Abuse Controls
 

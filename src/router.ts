@@ -1,5 +1,11 @@
 import { GatewayHttpError } from "./errors";
 import { isChinaProvider } from "./presets";
+import {
+  missingRequiredProviderHeaderEnvs,
+  providerBaseUrl,
+  providerCredentialEnv,
+  providerRequiresCredential,
+} from "./provider-config";
 import type {
   GatewayConfig,
   GatewayModelConfig,
@@ -7,6 +13,7 @@ import type {
   GatewayRouteCandidate,
   GatewayRouteDecision,
   GatewayRoutePolicy,
+  GatewayRouteScore,
   GatewayRuntimeOptions,
   OpenAIChatCompletionRequest,
 } from "./types";
@@ -39,6 +46,14 @@ function arrayIntersection(a: string[] | undefined, b: string[] | undefined): st
   if (!b) return a;
   const bSet = new Set(b);
   return a.filter((item) => bSet.has(item));
+}
+
+function arrayDifference(a: string[] | undefined, b: string[] | undefined): string[] | undefined {
+  if (!a) return undefined;
+  if (!b?.length) return a;
+  const bSet = new Set(b);
+  const result = a.filter((item) => !bSet.has(item));
+  return result.length ? result : undefined;
 }
 
 function arrayUnion(a: string[] | undefined, b: string[] | undefined): string[] | undefined {
@@ -97,14 +112,16 @@ function mergePolicy(
     : arrayUnion(configuredBlockedRegions, requestPolicy?.blocked_regions);
   const configuredAllowedProviders = route?.providerAllowlist ?? routePolicy.allowedProviders ?? configPolicy.allowedProviders;
   const configuredBlockedProviders = route?.providerBlocklist ?? routePolicy.blockedProviders ?? configPolicy.blockedProviders;
+  const requestAllowedProviders = requestPolicy?.provider_only ?? requestPolicy?.allowed_providers;
+  const requestBlockedProviders = arrayUnion(requestPolicy?.blocked_providers, requestPolicy?.provider_ignore);
 
   return {
     allowedProviders: allowExpansion
-      ? requestPolicy?.allowed_providers ?? configuredAllowedProviders
-      : arrayIntersection(configuredAllowedProviders, requestPolicy?.allowed_providers),
+      ? requestAllowedProviders ?? configuredAllowedProviders
+      : arrayDifference(arrayIntersection(configuredAllowedProviders, requestAllowedProviders), requestBlockedProviders),
     blockedProviders: allowExpansion
-      ? requestPolicy?.blocked_providers ?? configuredBlockedProviders
-      : arrayUnion(configuredBlockedProviders, requestPolicy?.blocked_providers),
+      ? requestBlockedProviders ?? configuredBlockedProviders
+      : arrayUnion(configuredBlockedProviders, requestBlockedProviders),
     allowedRegions,
     blockedRegions,
     allowTraining: allowExpansion
@@ -275,24 +292,58 @@ function candidateSkipReason(
   }
   if (!hasAllowedRegion(provider, policy)) return "provider region is not allowed";
   if (!providerHasRequiredDataPolicy(provider, policy)) return "provider data policy is not allowed";
-  if (policy.byokOnly && !provider.apiKeyEnv) return "provider is not configured for BYOK env credentials";
-  if (!provider.apiKeyEnv || !env[provider.apiKeyEnv]) return `provider key env ${provider.apiKeyEnv ?? "(none)"} is not set`;
+  if (!providerBaseUrl(provider, env)) return `provider baseUrl env ${provider.baseUrlEnv ?? "(none)"} is not set`;
+  const credentialEnv = providerCredentialEnv(provider);
+  if (policy.byokOnly && !credentialEnv) return "provider is not configured for BYOK env credentials";
+  if (providerRequiresCredential(provider) && (!credentialEnv || !env[credentialEnv])) {
+    return `provider key env ${credentialEnv ?? "(none)"} is not set`;
+  }
+  const missingHeaderEnvs = missingRequiredProviderHeaderEnvs(provider, env);
+  if (missingHeaderEnvs.length > 0) {
+    return `provider required header env ${missingHeaderEnvs.join(", ")} is not set`;
+  }
   if (!model.capabilities.includes("chat")) return "model does not support chat";
   if (request.stream && !model.capabilities.includes("streaming")) return "model does not support streaming";
   if (request.tools && request.tools.length > 0 && !model.capabilities.includes("tools")) {
     return "model does not support tools";
   }
+  if (request.response_format && !model.capabilities.includes("json")) return "model does not support json output";
+  for (const capability of request.gateway?.required_capabilities ?? []) {
+    if (!model.capabilities.includes(capability)) return `model does not support required capability ${capability}`;
+  }
+  if (
+    request.gateway?.min_context_tokens !== undefined &&
+    (model.contextWindow === undefined || model.contextWindow < request.gateway.min_context_tokens)
+  ) {
+    return "model context window is below request minimum";
+  }
+  if (
+    request.gateway?.min_quality !== undefined &&
+    (model.qualityScore === undefined || model.qualityScore < request.gateway.min_quality)
+  ) {
+    return "model quality score is below request minimum";
+  }
   if (
     policy.maxInputUsdPerMillionTokens !== undefined &&
-    model.inputUsdPerMillionTokens !== undefined &&
-    model.inputUsdPerMillionTokens > policy.maxInputUsdPerMillionTokens
+    model.inputUsdPerMillionTokens === undefined
+  ) {
+    return "model input price is not configured for policy";
+  }
+  if (
+    policy.maxInputUsdPerMillionTokens !== undefined &&
+    model.inputUsdPerMillionTokens! > policy.maxInputUsdPerMillionTokens
   ) {
     return "model input price exceeds policy";
   }
   if (
     policy.maxOutputUsdPerMillionTokens !== undefined &&
-    model.outputUsdPerMillionTokens !== undefined &&
-    model.outputUsdPerMillionTokens > policy.maxOutputUsdPerMillionTokens
+    model.outputUsdPerMillionTokens === undefined
+  ) {
+    return "model output price is not configured for policy";
+  }
+  if (
+    policy.maxOutputUsdPerMillionTokens !== undefined &&
+    model.outputUsdPerMillionTokens! > policy.maxOutputUsdPerMillionTokens
   ) {
     return "model output price exceeds policy";
   }
@@ -300,23 +351,225 @@ function candidateSkipReason(
   return undefined;
 }
 
-function sortCandidates(candidates: GatewayRouteCandidate[], mode: GatewayRoutePolicy["mode"]): GatewayRouteCandidate[] {
-  if (mode !== "cheapest") return candidates;
-  return [...candidates].sort((a, b) => {
-    const aCost =
-      a.model.inputUsdPerMillionTokens === undefined || a.model.outputUsdPerMillionTokens === undefined
-        ? Number.POSITIVE_INFINITY
-        : a.model.inputUsdPerMillionTokens + a.model.outputUsdPerMillionTokens;
-    const bCost =
-      b.model.inputUsdPerMillionTokens === undefined || b.model.outputUsdPerMillionTokens === undefined
-        ? Number.POSITIVE_INFINITY
-        : b.model.inputUsdPerMillionTokens + b.model.outputUsdPerMillionTokens;
-    return aCost - bCost;
+function candidateHasConfiguredPrice(candidate: GatewayRouteCandidate): boolean {
+  return candidate.model.inputUsdPerMillionTokens !== undefined && candidate.model.outputUsdPerMillionTokens !== undefined;
+}
+
+function configuredTokenPrice(candidate: GatewayRouteCandidate): number {
+  if (!candidateHasConfiguredPrice(candidate)) return Number.POSITIVE_INFINITY;
+  return candidate.model.inputUsdPerMillionTokens! + candidate.model.outputUsdPerMillionTokens!;
+}
+
+function estimateInputTokens(request: OpenAIChatCompletionRequest): number {
+  if (request.gateway?.expected_input_tokens !== undefined) return request.gateway.expected_input_tokens;
+  const chars = request.messages.reduce((sum, message) => {
+    if (typeof message.content === "string") return sum + message.content.length;
+    if (Array.isArray(message.content)) return sum + JSON.stringify(message.content).length;
+    return sum;
+  }, 0);
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
+function estimateOutputTokens(request: OpenAIChatCompletionRequest): number {
+  const maxTokens = request.max_completion_tokens ?? request.max_tokens;
+  return typeof maxTokens === "number" && maxTokens > 0 ? maxTokens : 512;
+}
+
+function estimatedRequestCost(candidate: GatewayRouteCandidate, request: OpenAIChatCompletionRequest): number | undefined {
+  if (!candidateHasConfiguredPrice(candidate)) return undefined;
+  return (
+    (estimateInputTokens(request) / 1_000_000) * candidate.model.inputUsdPerMillionTokens! +
+    (estimateOutputTokens(request) / 1_000_000) * candidate.model.outputUsdPerMillionTokens!
+  );
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function inferredQuality(candidate: GatewayRouteCandidate): number {
+  if (candidate.model.qualityScore !== undefined) return candidate.model.qualityScore;
+  let score = 0.45;
+  if (candidate.model.capabilities.includes("reasoning")) score += 0.15;
+  if (candidate.model.capabilities.includes("tools")) score += 0.1;
+  if (candidate.model.capabilities.includes("json")) score += 0.05;
+  if (candidate.model.capabilities.includes("vision")) score += 0.05;
+  score += Math.min(candidate.model.contextWindow ?? 0, 1_000_000) / 1_000_000 * 0.1;
+  return clamp01(score);
+}
+
+function inverseNormalize(value: number | undefined, values: Array<number | undefined>, fallback: number): number {
+  if (value === undefined) return fallback;
+  const finite = values.filter((item): item is number => item !== undefined && Number.isFinite(item));
+  if (finite.length === 0) return fallback;
+  const min = Math.min(...finite);
+  const max = Math.max(...finite);
+  if (min === max) return 1;
+  return clamp01(1 - (value - min) / (max - min));
+}
+
+function normalize(value: number | undefined, values: Array<number | undefined>, fallback: number): number {
+  if (value === undefined) return fallback;
+  const finite = values.filter((item): item is number => item !== undefined && Number.isFinite(item));
+  if (finite.length === 0) return fallback;
+  const min = Math.min(...finite);
+  const max = Math.max(...finite);
+  if (min === max) return 1;
+  return clamp01((value - min) / (max - min));
+}
+
+function hashString(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function stickyTieBreaker(candidate: GatewayRouteCandidate, request: OpenAIChatCompletionRequest): number {
+  const sessionId = request.gateway?.sticky_session_id ?? request.gateway?.session_id ?? request.session_id;
+  if (!sessionId) return 0;
+  return hashString(`${sessionId}:${candidate.model.id}`) / 0xffffffff;
+}
+
+function providerOrderScore(candidate: GatewayRouteCandidate, request: OpenAIChatCompletionRequest): number | undefined {
+  const order = request.gateway?.provider_order;
+  if (!order?.length) return undefined;
+  const index = order.indexOf(candidate.provider.id);
+  if (index < 0) return 0;
+  return 1 - index / Math.max(order.length, 1);
+}
+
+function weightsForMode(
+  mode: GatewayRoutePolicy["mode"],
+  request: OpenAIChatCompletionRequest,
+): Record<"cost" | "quality" | "latency" | "success" | "throughput" | "providerOrder", number> {
+  if (mode === "lowest-latency") {
+    return { cost: 0.1, quality: 0.1, latency: 0.55, success: 0.2, throughput: 0, providerOrder: 0.05 };
+  }
+  if (mode === "highest-throughput") {
+    return { cost: 0.1, quality: 0.1, latency: 0.1, success: 0.25, throughput: 0.4, providerOrder: 0.05 };
+  }
+
+  const priority = request.gateway?.priority ?? "balanced";
+  if (priority === "cost") {
+    return { cost: 0.55, quality: 0.15, latency: 0.1, success: 0.15, throughput: 0, providerOrder: 0.05 };
+  }
+  if (priority === "quality") {
+    return { cost: 0.1, quality: 0.55, latency: 0.1, success: 0.2, throughput: 0, providerOrder: 0.05 };
+  }
+  if (priority === "latency") {
+    return { cost: 0.1, quality: 0.15, latency: 0.45, success: 0.25, throughput: 0, providerOrder: 0.05 };
+  }
+
+  const tradeoff = clamp01((request.gateway?.cost_quality_tradeoff ?? 5) / 10);
+  return {
+    cost: 0.2 + tradeoff * 0.25,
+    quality: 0.45 - tradeoff * 0.25,
+    latency: 0.15,
+    success: 0.15,
+    throughput: 0,
+    providerOrder: 0.05,
+  };
+}
+
+function scoreCandidates(
+  candidates: GatewayRouteCandidate[],
+  mode: GatewayRoutePolicy["mode"],
+  request: OpenAIChatCompletionRequest,
+): GatewayRouteScore[] {
+  const costs = candidates.map((candidate) => estimatedRequestCost(candidate, request));
+  const latencies = candidates.map((candidate) => candidate.model.averageLatencyMs);
+  const throughputs = candidates.map((candidate) => candidate.model.throughputTokensPerSecond);
+  const weights = weightsForMode(mode, request);
+
+  return candidates.map((candidate) => {
+    const components = {
+      cost: inverseNormalize(estimatedRequestCost(candidate, request), costs, 0.35),
+      quality: inferredQuality(candidate),
+      latency: inverseNormalize(candidate.model.averageLatencyMs, latencies, 0.5),
+      success: candidate.model.successRate ?? 0.5,
+      throughput: normalize(candidate.model.throughputTokensPerSecond, throughputs, 0.5),
+      providerOrder: providerOrderScore(candidate, request) ?? 0.5,
+      sticky: stickyTieBreaker(candidate, request),
+    };
+    const score =
+      components.cost * weights.cost +
+      components.quality * weights.quality +
+      components.latency * weights.latency +
+      components.success * weights.success +
+      components.throughput * weights.throughput +
+      components.providerOrder * weights.providerOrder;
+    const reason =
+      mode === "lowest-latency"
+        ? "highest latency-weighted score among eligible models"
+        : mode === "highest-throughput"
+          ? "highest throughput and success weighted score among eligible models"
+          : "highest cost, quality, latency, and success weighted score among eligible models";
+
+    return {
+      provider: candidate.provider.id,
+      model: candidate.model.id,
+      providerModel: candidate.model.providerModel,
+      score,
+      reason,
+      components,
+    };
   });
 }
 
-function candidateHasConfiguredPrice(candidate: GatewayRouteCandidate): boolean {
-  return candidate.model.inputUsdPerMillionTokens !== undefined && candidate.model.outputUsdPerMillionTokens !== undefined;
+function scoreFor(candidate: GatewayRouteCandidate, scores: GatewayRouteScore[]): GatewayRouteScore | undefined {
+  return scores.find((score) => score.model === candidate.model.id && score.provider === candidate.provider.id);
+}
+
+function originalIndexMap(candidates: GatewayRouteCandidate[]): Map<string, number> {
+  return new Map(candidates.map((candidate, index) => [`${candidate.provider.id}:${candidate.model.id}`, index]));
+}
+
+function sortCandidates(
+  candidates: GatewayRouteCandidate[],
+  mode: GatewayRoutePolicy["mode"],
+  request: OpenAIChatCompletionRequest,
+): { sorted: GatewayRouteCandidate[]; scores?: GatewayRouteScore[] } {
+  const indexes = originalIndexMap(candidates);
+  const byOriginalOrder = (a: GatewayRouteCandidate, b: GatewayRouteCandidate): number =>
+    (indexes.get(`${a.provider.id}:${a.model.id}`) ?? 0) - (indexes.get(`${b.provider.id}:${b.model.id}`) ?? 0);
+
+  if (mode === "cheapest") {
+    return {
+      sorted: [...candidates].sort((a, b) => configuredTokenPrice(a) - configuredTokenPrice(b) || byOriginalOrder(a, b)),
+    };
+  }
+
+  if (mode === "fallback" || mode === "explicit") {
+    const order = request.gateway?.provider_order;
+    if (!order?.length) return { sorted: candidates };
+    return {
+      sorted: [...candidates].sort((a, b) => {
+        const aIndex = order.indexOf(a.provider.id);
+        const bIndex = order.indexOf(b.provider.id);
+        const aRank = aIndex < 0 ? Number.POSITIVE_INFINITY : aIndex;
+        const bRank = bIndex < 0 ? Number.POSITIVE_INFINITY : bIndex;
+        return aRank - bRank || byOriginalOrder(a, b);
+      }),
+    };
+  }
+
+  const scores = scoreCandidates(candidates, mode, request);
+  return {
+    scores,
+    sorted: [...candidates].sort((a, b) => {
+      const aScore = scoreFor(a, scores);
+      const bScore = scoreFor(b, scores);
+      return (
+        (bScore?.score ?? 0) - (aScore?.score ?? 0) ||
+        (bScore?.components.sticky ?? 0) - (aScore?.components.sticky ?? 0) ||
+        byOriginalOrder(a, b)
+      );
+    }),
+  };
 }
 
 function policyForDecision(policy: EffectivePolicy): GatewayRouteDecision["policy"] {
@@ -364,7 +617,8 @@ export function resolveRoute(options: GatewayRuntimeOptions, request: OpenAIChat
     }
   }
 
-  const sorted = sortCandidates(eligible, mode);
+  const { sorted, scores } = sortCandidates(eligible, mode, request);
+  if (scores) decision.scores = scores.sort((a, b) => b.score - a.score);
   if (mode === "cheapest" && sorted.length > 0 && !sorted.some(candidateHasConfiguredPrice)) {
     decision.reason = "no eligible model has configured token price for cheapest routing";
     throw new GatewayHttpError({
@@ -378,7 +632,14 @@ export function resolveRoute(options: GatewayRuntimeOptions, request: OpenAIChat
 
   if (sorted.length > 0) {
     decision.selected = sorted[0]?.model.id;
-    decision.reason = mode === "cheapest" ? "lowest configured token price among eligible models" : "first eligible model";
+    decision.reason =
+      mode === "cheapest"
+        ? "lowest configured token price among eligible models"
+        : scores
+          ? (scoreFor(sorted[0]!, scores)?.reason ?? "highest score among eligible models")
+          : request.gateway?.provider_order?.length
+            ? "first eligible model after provider_order hint"
+            : "first eligible model";
     return { candidates: sorted, decision };
   }
 

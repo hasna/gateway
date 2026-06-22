@@ -22,7 +22,8 @@ export type GatewayRoutingMode =
   | "cheapest"
   | "lowest-latency"
   | "highest-throughput"
-  | "balanced";
+  | "balanced"
+  | "smart";
 
 export type GatewayDataPolicy = {
   allowTraining?: boolean;
@@ -41,7 +42,10 @@ export type GatewayProviderConfig = {
   displayName: string;
   kind: GatewayProviderKind;
   baseUrl?: string;
+  baseUrlEnv?: string;
   apiKeyEnv?: string;
+  auth?: GatewayProviderAuthConfig;
+  headers?: Record<string, GatewayProviderHeaderValue>;
   enabled?: boolean;
   regions?: string[];
   jurisdiction?: string;
@@ -60,7 +64,27 @@ export type GatewayModelConfig = {
   contextWindow?: number;
   inputUsdPerMillionTokens?: number;
   outputUsdPerMillionTokens?: number;
+  qualityScore?: number;
+  averageLatencyMs?: number;
+  successRate?: number;
+  throughputTokensPerSecond?: number;
 };
+
+export type GatewayProviderAuthConfig = {
+  type?: "bearer" | "header" | "none";
+  apiKeyEnv?: string;
+  headerName?: string;
+  prefix?: string;
+};
+
+export type GatewayProviderHeaderValue =
+  | string
+  | {
+      value?: string;
+      env?: string;
+      prefix?: string;
+      required?: boolean;
+    };
 
 export type GatewayRoutePolicy = {
   id: string;
@@ -152,6 +176,25 @@ export type ChatMessage = {
 
 export type GatewayRequestOptions = {
   routing?: GatewayRoutingMode;
+  task?: string;
+  priority?: "cost" | "quality" | "latency" | "balanced";
+  cost_quality_tradeoff?: number;
+  sticky_session_id?: string;
+  session_id?: string;
+  min_quality?: number;
+  min_context_tokens?: number;
+  expected_input_tokens?: number;
+  required_capabilities?: GatewayModelCapability[];
+  provider_order?: string[];
+  provider_only?: string[];
+  provider_ignore?: string[];
+  provider_sort?: string | Record<string, unknown>;
+  allow_fallbacks?: boolean;
+  zdr?: boolean;
+  data_collection?: "allow" | "deny";
+  max_price?: Record<string, number>;
+  caching?: "auto";
+  provider_timeouts?: Record<string, unknown>;
   allowed_providers?: string[];
   blocked_providers?: string[];
   allowed_regions?: string[];
@@ -198,6 +241,10 @@ export type OpenAIChatCompletionRequest = {
   user?: string;
   gateway?: GatewayRequestOptions;
   provider_options?: Record<string, unknown>;
+  providerOptions?: Record<string, unknown>;
+  provider?: unknown;
+  plugins?: unknown;
+  session_id?: string;
   [key: string]: unknown;
 };
 
@@ -237,6 +284,15 @@ export type GatewayRouteAttempt = {
   latencyMs?: number;
 };
 
+export type GatewayRouteScore = {
+  provider: string;
+  model: string;
+  providerModel: string;
+  score: number;
+  reason: string;
+  components: Record<string, number>;
+};
+
 export type GatewayRouteDecision = {
   requested_model: string;
   resolved_candidates: string[];
@@ -255,6 +311,7 @@ export type GatewayRouteDecision = {
   };
   reason: string;
   attempts: GatewayRouteAttempt[];
+  scores?: GatewayRouteScore[];
 };
 
 export type GatewayRouteCandidate = {
@@ -285,6 +342,7 @@ export type ProviderBuildInput = {
   request: OpenAIChatCompletionRequest;
   apiKey: string;
   timeoutMs: number;
+  env?: Record<string, string | undefined>;
   fetchImpl?: GatewayFetch;
   signal?: AbortSignal;
 };

@@ -11,6 +11,7 @@ The default self-hosted behavior should be conservative:
 - Do not call a provider without a configured key.
 - Do not call a hosted Hasna endpoint unless the user configured it.
 - Do not route to China-region or China-owned providers unless the route or config allows them.
+- Do not score or prefer a candidate until region, data, BYOK, credential, capability, and cost policy filters have passed.
 
 ## Model Names
 
@@ -110,6 +111,35 @@ Fallbacks should not hide:
 - Provider authentication errors.
 - User input errors.
 - Unsafe region or data policy mismatches.
+
+## Smart Routing
+
+Smart routing is an ordered policy and scoring layer:
+
+1. Resolve the requested model or alias into configured candidates.
+2. Apply policy filters first: provider allow/block lists, region, China opt-in, data retention, training/logging, BYOK, credentials, model capability, context window, and price ceilings.
+3. Score only the remaining eligible candidates.
+4. Return the route decision, skipped reasons, scores, and selected model in gateway metadata and ledger records.
+
+Supported route modes:
+
+- `fallback`: first eligible candidate in configured order.
+- `cheapest`: lowest configured input plus output token price. If no eligible candidate has prices, the route fails closed.
+- `lowest-latency`: latency-weighted score using configured `averageLatencyMs` when present.
+- `highest-throughput`: throughput and success weighted score using configured `throughputTokensPerSecond` and `successRate`.
+- `balanced`: weighted score across cost, quality, latency, and success.
+- `smart`: same score inputs as `balanced`, adjusted by request hints such as `priority` and `cost_quality_tradeoff`.
+
+Request hints under `gateway` can reduce the eligible set or tune scoring:
+
+- `priority`: `cost`, `quality`, `latency`, or `balanced`.
+- `cost_quality_tradeoff`: `0` favors quality, `10` favors cost.
+- `sticky_session_id` or `session_id`: deterministic tie-breaking for repeated conversations.
+- `required_capabilities`: capabilities such as `tools`, `json`, `vision`, or `reasoning`.
+- `min_quality` and `min_context_tokens`.
+- `provider_order`, `provider_only`, and `provider_ignore`.
+
+When configured metrics are missing, smart routing uses deterministic fallback values and original candidate order. It does not read the usage ledger inside synchronous route resolution; future runtime metric injection can pass precomputed latency/success data into routing without changing the fail-closed policy order.
 
 ## Cost Controls
 

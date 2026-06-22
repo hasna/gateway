@@ -25,12 +25,123 @@ export const providerPresets: Record<string, GatewayProviderConfig> = {
     kind: "openai-compatible",
     baseUrl: "https://openrouter.ai/api/v1",
     apiKeyEnv: "OPENROUTER_API_KEY",
+    headers: {
+      "http-referer": "https://github.com/hasna/open-gateway",
+      "x-title": "Hasna Gateway",
+    },
     enabled: true,
     regions: ["global"],
     dataPolicy: {
       allowTraining: false,
       allowLogging: true,
       zeroDataRetentionAvailable: false,
+      byokOnly: true,
+    },
+  },
+  "vercel-ai-gateway": {
+    id: "vercel-ai-gateway",
+    displayName: "Vercel AI Gateway",
+    kind: "openai-compatible",
+    baseUrl: "https://ai-gateway.vercel.sh/v1",
+    apiKeyEnv: "AI_GATEWAY_API_KEY",
+    enabled: true,
+    regions: ["global"],
+    dataPolicy: {
+      allowTraining: false,
+      allowLogging: true,
+      zeroDataRetentionAvailable: false,
+      byokOnly: true,
+    },
+  },
+  "litellm-proxy": {
+    id: "litellm-proxy",
+    displayName: "LiteLLM Proxy",
+    kind: "openai-compatible",
+    baseUrlEnv: "LITELLM_PROXY_BASE_URL",
+    apiKeyEnv: "LITELLM_API_KEY",
+    enabled: true,
+    regions: ["private"],
+    jurisdiction: "self-hosted",
+    dataPolicy: {
+      allowTraining: false,
+      allowLogging: false,
+      zeroDataRetentionAvailable: true,
+      byokOnly: true,
+    },
+  },
+  portkey: {
+    id: "portkey",
+    displayName: "Portkey AI Gateway",
+    kind: "openai-compatible",
+    baseUrl: "https://api.portkey.ai/v1",
+    auth: {
+      type: "header",
+      apiKeyEnv: "PORTKEY_API_KEY",
+      headerName: "x-portkey-api-key",
+      prefix: "",
+    },
+    headers: {
+      "x-portkey-config": { env: "PORTKEY_CONFIG_ID" },
+      "x-portkey-provider": { env: "PORTKEY_PROVIDER" },
+      "x-portkey-virtual-key": { env: "PORTKEY_VIRTUAL_KEY" },
+    },
+    enabled: true,
+    regions: ["global"],
+    dataPolicy: {
+      allowTraining: false,
+      allowLogging: true,
+      zeroDataRetentionAvailable: false,
+      byokOnly: true,
+    },
+  },
+  "cloudflare-ai-gateway": {
+    id: "cloudflare-ai-gateway",
+    displayName: "Cloudflare AI Gateway",
+    kind: "openai-compatible",
+    baseUrlEnv: "CLOUDFLARE_AI_GATEWAY_BASE_URL",
+    apiKeyEnv: "CLOUDFLARE_API_TOKEN",
+    enabled: true,
+    regions: ["global"],
+    dataPolicy: {
+      allowTraining: false,
+      allowLogging: true,
+      zeroDataRetentionAvailable: false,
+      byokOnly: true,
+    },
+  },
+  "helicone-ai-gateway": {
+    id: "helicone-ai-gateway",
+    displayName: "Helicone AI Gateway",
+    kind: "openai-compatible",
+    baseUrl: "https://ai-gateway.helicone.ai/v1",
+    auth: {
+      type: "header",
+      apiKeyEnv: "HELICONE_API_KEY",
+      headerName: "Helicone-Auth",
+      prefix: "Bearer ",
+    },
+    enabled: true,
+    regions: ["global"],
+    dataPolicy: {
+      allowTraining: false,
+      allowLogging: true,
+      zeroDataRetentionAvailable: false,
+      byokOnly: true,
+    },
+  },
+  "kong-ai-gateway": {
+    id: "kong-ai-gateway",
+    displayName: "Kong AI Gateway",
+    kind: "openai-compatible",
+    baseUrlEnv: "KONG_AI_GATEWAY_BASE_URL",
+    apiKeyEnv: "KONG_AI_GATEWAY_API_KEY",
+    enabled: true,
+    regions: ["private"],
+    jurisdiction: "self-hosted",
+    dataPolicy: {
+      allowTraining: false,
+      allowLogging: false,
+      zeroDataRetentionAvailable: true,
       byokOnly: true,
     },
   },
@@ -117,6 +228,7 @@ export const providerPresets: Record<string, GatewayProviderConfig> = {
 };
 
 export const modelPresets: GatewayModelConfig[] = [
+  // --- OpenAI ---
   {
     id: "openai/gpt-4.1-mini",
     providerId: "openai",
@@ -137,6 +249,8 @@ export const modelPresets: GatewayModelConfig[] = [
     inputUsdPerMillionTokens: 0.15,
     outputUsdPerMillionTokens: 0.6,
   },
+
+  // --- OpenRouter ---
   {
     id: "openrouter/openai/gpt-4.1-mini",
     providerId: "openrouter",
@@ -146,12 +260,72 @@ export const modelPresets: GatewayModelConfig[] = [
     contextWindow: 1_000_000,
   },
   {
+    id: "openrouter/auto",
+    providerId: "openrouter",
+    providerModel: "openrouter/auto",
+    aliases: ["openrouter-auto", "gateway-auto"],
+    capabilities: ["chat", "streaming", "tools", "json", "reasoning"],
+    contextWindow: 200_000,
+  },
+
+  // --- External OpenAI-compatible gateways ---
+  {
+    id: "vercel-ai-gateway/openai/gpt-4.1-mini",
+    providerId: "vercel-ai-gateway",
+    providerModel: "openai/gpt-4.1-mini",
+    aliases: ["vercel-fast", "vercel-coding"],
+    capabilities: ["chat", "streaming", "tools", "json"],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: "litellm-proxy/coding",
+    providerId: "litellm-proxy",
+    providerModel: "coding",
+    aliases: ["litellm-coding"],
+    capabilities: ["chat", "streaming", "tools", "json"],
+  },
+  {
+    id: "portkey/openai/gpt-4.1-mini",
+    providerId: "portkey",
+    providerModel: "openai/gpt-4.1-mini",
+    aliases: ["portkey-coding"],
+    capabilities: ["chat", "streaming", "tools", "json"],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: "cloudflare-ai-gateway/openai/gpt-4.1-mini",
+    providerId: "cloudflare-ai-gateway",
+    providerModel: "openai/gpt-4.1-mini",
+    aliases: ["cloudflare-coding"],
+    capabilities: ["chat", "streaming", "tools", "json"],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: "helicone-ai-gateway/openai/gpt-4.1-mini",
+    providerId: "helicone-ai-gateway",
+    providerModel: "openai/gpt-4.1-mini",
+    aliases: ["helicone-coding"],
+    capabilities: ["chat", "streaming", "tools", "json"],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: "kong-ai-gateway/coding",
+    providerId: "kong-ai-gateway",
+    providerModel: "coding",
+    aliases: ["kong-coding"],
+    capabilities: ["chat", "streaming", "tools", "json"],
+  },
+
+  // --- DeepSeek ---
+  {
     id: "deepseek/deepseek-v4-pro",
     providerId: "deepseek",
     providerModel: "deepseek-v4-pro",
     aliases: ["coding", "reasoning", "china-coding"],
     capabilities: ["chat", "streaming", "tools", "reasoning"],
-    contextWindow: 64_000,
+    contextWindow: 1_000_000,
+    inputUsdPerMillionTokens: 0.435,
+    outputUsdPerMillionTokens: 0.87,
   },
   {
     id: "deepseek/deepseek-v4-flash",
@@ -159,15 +333,19 @@ export const modelPresets: GatewayModelConfig[] = [
     providerModel: "deepseek-v4-flash",
     aliases: ["fast", "cheap", "china-fast"],
     capabilities: ["chat", "streaming", "tools"],
-    contextWindow: 64_000,
+    contextWindow: 1_000_000,
+    inputUsdPerMillionTokens: 0.14,
+    outputUsdPerMillionTokens: 0.28,
   },
+
+  // --- Qwen / DashScope ---
   {
     id: "qwen/qwen3-coder-plus",
     providerId: "qwen",
     providerModel: "qwen3-coder-plus",
     aliases: ["coding", "china-coding"],
-    capabilities: ["chat", "streaming", "tools"],
-    contextWindow: 128_000,
+    capabilities: ["chat", "streaming", "tools", "reasoning"],
+    contextWindow: 1_000_000,
   },
   {
     id: "qwen/qwen-plus",
@@ -177,6 +355,8 @@ export const modelPresets: GatewayModelConfig[] = [
     capabilities: ["chat", "streaming", "tools"],
     contextWindow: 128_000,
   },
+
+  // --- Kimi / Moonshot ---
   {
     id: "kimi/kimi-k2.7-code",
     providerId: "kimi",
@@ -184,6 +364,8 @@ export const modelPresets: GatewayModelConfig[] = [
     aliases: ["coding", "china-coding"],
     capabilities: ["chat", "streaming", "tools", "reasoning"],
     contextWindow: 256_000,
+    inputUsdPerMillionTokens: 0.95,
+    outputUsdPerMillionTokens: 4.0,
   },
   {
     id: "kimi/kimi-k2.7-code-highspeed",
@@ -192,6 +374,8 @@ export const modelPresets: GatewayModelConfig[] = [
     aliases: ["fast", "china-fast"],
     capabilities: ["chat", "streaming", "tools", "reasoning"],
     contextWindow: 256_000,
+    inputUsdPerMillionTokens: 1.9,
+    outputUsdPerMillionTokens: 8.0,
   },
   {
     id: "kimi/kimi-k2.6",
@@ -201,19 +385,37 @@ export const modelPresets: GatewayModelConfig[] = [
     capabilities: ["chat", "streaming", "tools"],
     contextWindow: 256_000,
   },
+
+  // --- Z.AI / GLM ---
   {
-    id: "zai/glm-5.1",
+    id: "zai/glm-5.2",
     providerId: "zai",
-    providerModel: "glm-5.1",
+    providerModel: "glm-5.2",
     aliases: ["reasoning", "coding", "china-reasoning", "china-coding"],
     capabilities: ["chat", "streaming", "tools", "reasoning"],
     contextWindow: 1_000_000,
   },
   {
+    id: "zai/glm-5.1",
+    providerId: "zai",
+    providerModel: "glm-5.1",
+    aliases: ["reasoning", "china-reasoning"],
+    capabilities: ["chat", "streaming", "tools", "reasoning"],
+    contextWindow: 200_000,
+  },
+  {
     id: "zai/glm-5",
     providerId: "zai",
     providerModel: "glm-5",
-    aliases: ["reasoning", "china-reasoning"],
+    aliases: ["reasoning-legacy", "china-reasoning-legacy"],
+    capabilities: ["chat", "streaming", "tools", "reasoning"],
+    contextWindow: 200_000,
+  },
+  {
+    id: "zai/glm-4.7",
+    providerId: "zai",
+    providerModel: "glm-4.7",
+    aliases: ["reasoning-legacy"],
     capabilities: ["chat", "streaming", "tools", "reasoning"],
     contextWindow: 200_000,
   },
@@ -221,10 +423,12 @@ export const modelPresets: GatewayModelConfig[] = [
     id: "zai/glm-4.5",
     providerId: "zai",
     providerModel: "glm-4.5",
-    aliases: ["reasoning-legacy", "china-reasoning-legacy"],
+    aliases: ["reasoning-legacy"],
     capabilities: ["chat", "streaming", "tools", "reasoning"],
     contextWindow: 128_000,
   },
+
+  // --- SiliconFlow ---
   {
     id: "siliconflow/Pro/zai-org/GLM-4.7",
     providerId: "siliconflow",
@@ -232,6 +436,14 @@ export const modelPresets: GatewayModelConfig[] = [
     aliases: ["reasoning", "china-reasoning"],
     capabilities: ["chat", "streaming", "reasoning"],
     contextWindow: 128_000,
+  },
+  {
+    id: "siliconflow/zai-org/GLM-5.2",
+    providerId: "siliconflow",
+    providerModel: "zai-org/GLM-5.2",
+    aliases: ["reasoning", "coding", "china-reasoning", "china-coding"],
+    capabilities: ["chat", "streaming", "tools", "reasoning"],
+    contextWindow: 1_000_000,
   },
 ];
 

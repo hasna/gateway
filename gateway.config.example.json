@@ -51,7 +51,7 @@
         "deepseek/deepseek-v4-pro",
         "qwen/qwen3-coder-plus",
         "kimi/kimi-k2.7-code",
-        "zai/glm-5.1"
+        "zai/glm-5.2"
       ],
       "dataPolicy": {
         "allowTraining": false,
@@ -80,12 +80,12 @@
       "id": "china-coding",
       "mode": "fallback",
       "modelAliases": ["china-coding"],
-      "providerAllowlist": ["deepseek", "qwen", "kimi"],
+      "providerAllowlist": ["deepseek", "qwen", "kimi", "zai"],
       "fallbackModelIds": [
         "deepseek/deepseek-v4-pro",
         "qwen/qwen3-coder-plus",
         "kimi/kimi-k2.7-code",
-        "zai/glm-5.1"
+        "zai/glm-5.2"
       ],
       "dataPolicy": {
         "allowTraining": false,
