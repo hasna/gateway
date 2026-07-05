@@ -24,14 +24,22 @@ Provider keys are never sent by the client unless explicit BYOK request support 
 
 ## `GET /health`
 
-Returns service status.
+Returns service status. In `local` runtime mode this is a lightweight liveness check. In `production-cloud` mode with `runtime.health.requireRuntimeSecrets: true`, it is a fail-closed readiness check and returns `503` until the gateway key is present and every configured route has an eligible provider with its key present.
 
 ```json
 {
   "status": "ok",
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "runtime": {
+    "mode": "production-cloud"
+  },
+  "checks": {
+    "runtimeSecrets": "ok"
+  }
 }
 ```
+
+Readiness responses must not include secret values or environment variable names.
 
 ## `GET /v1/models`
 

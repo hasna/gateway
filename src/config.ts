@@ -1,5 +1,6 @@
 import { GatewayHttpError } from "./errors";
 import { modelPresets, providerPresets } from "./presets";
+import { resolveRoute } from "./router";
 import { z } from "zod";
 import type {
   GatewayAuthConfig,
@@ -12,8 +13,10 @@ import type {
   GatewayStorageConfig,
   GatewayModelConfig,
   GatewayProviderConfig,
+  GatewayRuntimeConfig,
   GatewayRoutePolicy,
   GatewayServerConfig,
+  OpenAIChatCompletionRequest,
 } from "./types";
 
 const dataPolicySchema = z
@@ -78,6 +81,27 @@ const storageSchema = z
           .passthrough(),
       ])
       .optional(),
+  })
+  .passthrough();
+
+const serviceDiscoverySchema = z
+  .object({
+    allowLocalProviderEndpoints: z.boolean().optional(),
+    allowedProviderBaseUrls: z.array(z.string().url()).optional(),
+  })
+  .passthrough();
+
+const healthSchema = z
+  .object({
+    requireRuntimeSecrets: z.boolean().optional(),
+  })
+  .passthrough();
+
+const runtimeSchema = z
+  .object({
+    mode: z.enum(["local", "production-cloud"]).optional(),
+    serviceDiscovery: serviceDiscoverySchema.optional(),
+    health: healthSchema.optional(),
   })
   .passthrough();
 
@@ -152,6 +176,7 @@ const routeSchema = z
 
 const gatewayConfigInputSchema = z
   .object({
+    runtime: runtimeSchema.optional(),
     server: serverSchema.optional(),
     auth: authSchema.optional(),
     storage: storageSchema.optional(),
@@ -180,6 +205,16 @@ const defaultAuth: GatewayAuthConfig = {
 };
 
 const defaultStorage: GatewayStorageConfig = {};
+
+const defaultRuntime: GatewayRuntimeConfig = {
+  mode: "local",
+  serviceDiscovery: {
+    allowLocalProviderEndpoints: true,
+  },
+  health: {
+    requireRuntimeSecrets: false,
+  },
+};
 
 const defaultPolicy: GatewayGlobalPolicy = {
   allowTraining: false,
@@ -320,6 +355,23 @@ function normalizeModel(model: GatewayModelConfig): GatewayModelConfig {
   };
 }
 
+function normalizeRuntime(input: GatewayConfigInput["runtime"]): GatewayRuntimeConfig {
+  const mode = input?.mode ?? defaultRuntime.mode;
+  return {
+    mode,
+    serviceDiscovery: {
+      allowLocalProviderEndpoints:
+        input?.serviceDiscovery?.allowLocalProviderEndpoints ?? (mode === "production-cloud" ? false : true),
+      ...(input?.serviceDiscovery?.allowedProviderBaseUrls
+        ? { allowedProviderBaseUrls: input.serviceDiscovery.allowedProviderBaseUrls }
+        : {}),
+    },
+    health: {
+      requireRuntimeSecrets: input?.health?.requireRuntimeSecrets ?? mode === "production-cloud",
+    },
+  };
+}
+
 function withPresetExpansion(input: GatewayConfigInput): {
   providers: GatewayProviderConfig[];
   models: GatewayModelConfig[];
@@ -344,6 +396,7 @@ export function normalizeConfig(input: GatewayConfigInput): GatewayConfig {
   const expanded = withPresetExpansion(input);
 
   return {
+    runtime: normalizeRuntime(input.runtime),
     server: {
       ...defaultServer,
       ...(input.server ?? {}),
@@ -391,6 +444,88 @@ function assertCloudStorage(config: GatewayConfig, errors: string[]): void {
   }
 }
 
+function parseIpv4(hostname: string): number[] | undefined {
+  const parts = hostname.split(".");
+  if (parts.length !== 4) return undefined;
+  const parsed = parts.map((part) => Number(part));
+  if (parsed.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return undefined;
+  return parsed;
+}
+
+function normalizeHostname(hostname: string): string {
+  const normalized = hostname.toLowerCase();
+  return normalized.startsWith("[") && normalized.endsWith("]") ? normalized.slice(1, -1) : normalized;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = normalizeHostname(hostname);
+  const ipv4 = parseIpv4(normalized);
+  return (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "0:0:0:0:0:0:0:1" ||
+    normalized.endsWith(".localhost") ||
+    normalized.startsWith("::ffff:127.") ||
+    ipv4?.[0] === 127
+  );
+}
+
+function isPrivateProviderHost(hostname: string): boolean {
+  const normalized = normalizeHostname(hostname);
+  const ipv4 = parseIpv4(normalized);
+  if (!ipv4 && normalized.startsWith("::ffff:")) {
+    const mappedIpv4 = parseIpv4(normalized.slice("::ffff:".length));
+    return mappedIpv4 ? isPrivateProviderHost(mappedIpv4.join(".")) : true;
+  }
+  if (!ipv4 && normalized.includes(":")) {
+    const firstHextet = Number.parseInt(normalized.split(":")[0] || "0", 16);
+    return (
+      isLoopbackHost(normalized) ||
+      normalized === "::" ||
+      (Number.isFinite(firstHextet) && (firstHextet & 0xfe00) === 0xfc00) ||
+      (Number.isFinite(firstHextet) && (firstHextet & 0xffc0) === 0xfe80)
+    );
+  }
+  if (!ipv4) return isLoopbackHost(normalized);
+  const [first = 0, second = 0] = ipv4;
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    (first === 169 && second === 254)
+  );
+}
+
+function urlOrigin(value: string): string {
+  return new URL(value).origin;
+}
+
+function validateProductionProviderBoundary(config: GatewayConfig, provider: GatewayProviderConfig, errors: string[]): void {
+  if (provider.enabled === false || !provider.baseUrl) return;
+
+  const discovery = config.runtime.serviceDiscovery;
+  const allowedOrigins = new Set((discovery.allowedProviderBaseUrls ?? []).map(urlOrigin));
+  const providerUrl = new URL(provider.baseUrl);
+  const providerOrigin = providerUrl.origin;
+  const explicitlyAllowed = allowedOrigins.size > 0 && allowedOrigins.has(providerOrigin);
+
+  if (allowedOrigins.size > 0 && !explicitlyAllowed) {
+    errors.push(`provider ${provider.id} baseUrl origin ${providerOrigin} is not in runtime.serviceDiscovery.allowedProviderBaseUrls.`);
+  }
+
+  if (!discovery.allowLocalProviderEndpoints && isPrivateProviderHost(providerUrl.hostname)) {
+    errors.push(`provider ${provider.id} baseUrl must not resolve to a local or private endpoint in production-cloud mode.`);
+  }
+
+  if (
+    providerUrl.protocol !== "https:" &&
+    !(discovery.allowLocalProviderEndpoints && explicitlyAllowed && isPrivateProviderHost(providerUrl.hostname))
+  ) {
+    errors.push(`provider ${provider.id} baseUrl must use https in production-cloud mode unless an explicit local endpoint allowlist is enabled.`);
+  }
+}
+
 export function validateConfig(input: GatewayConfigInput): GatewayConfigValidationResult {
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -427,6 +562,18 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
   assertString(config.auth.apiKeyEnv, "auth.apiKeyEnv", errors);
   assertCloudStorage(config, errors);
 
+  if (config.runtime.mode === "production-cloud") {
+    if (!config.auth.required) {
+      errors.push("production-cloud runtime requires auth.required to be true.");
+    }
+    if (isLoopbackHost(config.server.host)) {
+      errors.push("production-cloud runtime requires server.host to bind a non-loopback interface such as 0.0.0.0.");
+    }
+    if (!config.runtime.health.requireRuntimeSecrets) {
+      errors.push("production-cloud runtime requires runtime.health.requireRuntimeSecrets to be true.");
+    }
+  }
+
   const providerIds = new Set<string>();
   for (const provider of config.providers) {
     assertString(provider.id, "provider.id", errors);
@@ -437,6 +584,12 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
     }
     if (!provider.apiKeyEnv) {
       warnings.push(`provider ${provider.id} does not define apiKeyEnv and will not be callable.`);
+    }
+    if (config.runtime.mode === "production-cloud" && provider.enabled !== false && !provider.apiKeyEnv) {
+      errors.push(`provider ${provider.id} must define apiKeyEnv in production-cloud mode.`);
+    }
+    if (config.runtime.mode === "production-cloud") {
+      validateProductionProviderBoundary(config, provider, errors);
     }
     if (providerIds.has(provider.id)) {
       errors.push(`provider id '${provider.id}' is duplicated.`);
@@ -570,6 +723,33 @@ export async function loadGatewayConfig(path = "gateway.config.json"): Promise<G
   return result.config;
 }
 
+function routeProbeRequest(model: string): OpenAIChatCompletionRequest {
+  return {
+    model,
+    messages: [{ role: "user", content: "health" }],
+  };
+}
+
+function validateProductionRouteReadiness(config: GatewayConfig, env: Record<string, string | undefined>): string[] {
+  if (config.runtime.mode !== "production-cloud" || config.routes.length === 0) return [];
+
+  const unavailableRouteIds = config.routes
+    .filter((route) => {
+      const model = route.modelAliases?.[0] ?? route.id;
+      try {
+        resolveRoute({ config, env }, routeProbeRequest(model));
+        return false;
+      } catch {
+        return true;
+      }
+    })
+    .map((route) => route.id);
+
+  return unavailableRouteIds.length > 0
+    ? [`Production cloud routes without an eligible provider key: ${unavailableRouteIds.join(", ")}.`]
+    : [];
+}
+
 export function validateRuntimeSecrets(config: GatewayConfig, env: Record<string, string | undefined>): string[] {
   const errors: string[] = [];
 
@@ -585,6 +765,8 @@ export function validateRuntimeSecrets(config: GatewayConfig, env: Record<string
   if (!hasCallableProvider) {
     errors.push("At least one enabled provider must have its apiKeyEnv set in the environment.");
   }
+
+  errors.push(...validateProductionRouteReadiness(config, env));
 
   return errors;
 }

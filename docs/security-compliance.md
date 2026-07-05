@@ -13,6 +13,11 @@ The secure default is:
 - No secrets in route decision logs.
 - Fail closed on unknown data policy.
 
+Runtime mode must also match the deployment:
+
+- `local` is the self-hosted default and keeps `/health` as liveness only.
+- `production-cloud` is for cloud ingress and requires gateway auth, non-loopback binding, secret-aware health readiness, and cloud-safe provider endpoint validation.
+
 ## Secrets
 
 Provider keys should be loaded from environment variables or a configured secret provider. They must not be stored in plaintext config files by default.
@@ -31,6 +36,8 @@ Recommended open-source env variables:
 - `SILICONFLOW_API_KEY`
 
 Hosted Hasna can use a private key vault and tenant-scoped provider credentials.
+
+In `production-cloud` mode, `/health` returns `503` until the gateway key is available and every configured route has an eligible provider with its key available. The response reports only generic readiness state and runtime mode; it must not reveal environment variable names or secret values.
 
 ## Logging
 
@@ -69,6 +76,8 @@ Provider policy must be explicit. Important examples:
 - `byok_only: true`
 
 If provider terms, retention, or region are unknown, the gateway should treat the provider as unavailable for restricted routes.
+
+Provider service discovery must be explicit for production cloud runtime. Enabled providers must use configured `baseUrl` values, and operators can set `runtime.serviceDiscovery.allowedProviderBaseUrls` to a list of exact provider origins. Local/private endpoints and non-HTTPS provider URLs are rejected by default in production cloud mode. These are static config checks; DNS resolution and cloud egress policy remain operator responsibilities.
 
 ## Abuse Controls
 

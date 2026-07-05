@@ -7,7 +7,109 @@ describe("HTTP server handler", () => {
     const handler = createGatewayHandler({ config: testConfig(), env: {} });
     const response = await handler(new Request("http://localhost/health"));
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ status: "ok" });
+    expect(await response.json()).toMatchObject({
+      status: "ok",
+      runtime: {
+        mode: "local",
+      },
+      checks: {
+        runtimeSecrets: "not_required",
+      },
+    });
+  });
+
+  test("fails health closed when production cloud runtime secrets are missing", async () => {
+    const config = testConfig();
+    config.runtime = {
+      mode: "production-cloud",
+      serviceDiscovery: {
+        allowLocalProviderEndpoints: false,
+      },
+      health: {
+        requireRuntimeSecrets: true,
+      },
+    };
+    config.server.host = "0.0.0.0";
+
+    const handler = createGatewayHandler({ config, env: {} });
+    const response = await handler(new Request("http://localhost/health"));
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({
+      status: "unhealthy",
+      runtime: {
+        mode: "production-cloud",
+      },
+      checks: {
+        runtimeSecrets: "failed",
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("GATEWAY_API_KEY");
+    expect(JSON.stringify(body)).not.toContain("OPENAI_API_KEY");
+  });
+
+  test("serves healthy production cloud health when runtime secrets are present", async () => {
+    const config = testConfig();
+    config.runtime = {
+      mode: "production-cloud",
+      serviceDiscovery: {
+        allowLocalProviderEndpoints: false,
+      },
+      health: {
+        requireRuntimeSecrets: true,
+      },
+    };
+    config.server.host = "0.0.0.0";
+
+    const handler = createGatewayHandler({
+      config,
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(new Request("http://localhost/health"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "ok",
+      runtime: {
+        mode: "production-cloud",
+      },
+      checks: {
+        runtimeSecrets: "ok",
+      },
+    });
+  });
+
+  test("fails production cloud health when keyed providers cannot satisfy every configured route", async () => {
+    const config = testConfig();
+    config.runtime = {
+      mode: "production-cloud",
+      serviceDiscovery: {
+        allowLocalProviderEndpoints: false,
+      },
+      health: {
+        requireRuntimeSecrets: true,
+      },
+    };
+    config.server.host = "0.0.0.0";
+
+    const handler = createGatewayHandler({
+      config,
+      env: { GATEWAY_API_KEY: "gateway", DEEPSEEK_API_KEY: "deepseek" },
+    });
+    const response = await handler(new Request("http://localhost/health"));
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({
+      status: "unhealthy",
+      runtime: {
+        mode: "production-cloud",
+      },
+      checks: {
+        runtimeSecrets: "failed",
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("DEEPSEEK_API_KEY");
   });
 
   test("serves version without auth", async () => {
