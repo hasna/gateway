@@ -198,6 +198,7 @@ export async function createChatCompletion(
       const providerJson = await parseProviderJson(response);
       const rawUsage = providerJson.usage;
       const usage = normalizeUsage(rawUsage);
+      await options.rateLimit?.onUsage?.(usage);
       const estimatedCostUsd = estimateCostUsd(usage, candidate.model);
       const budgets = await evaluateBudgetPostflight(
         options.config,
@@ -289,9 +290,12 @@ export async function createChatCompletionStream(
     let response: Response;
     const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     let hardBudgetRequiresUsage = false;
+    const rateLimitRequiresUsage = options.rateLimit?.requiresStreamingUsage === true;
     try {
       const budgetStatuses = await assertBudgetPreflight(options.config, budgetContext);
-      const budgetedRequest = budgetStatuses.length > 0 ? requestWithStreamingUsage(request) : request;
+      const budgetedRequest = budgetStatuses.length > 0 || rateLimitRequiresUsage
+        ? requestWithStreamingUsage(request)
+        : request;
       hardBudgetRequiresUsage = budgetStatuses.some((status) => status.budget.mode === "hard");
       response = await openProviderStream(options, budgetedRequest, candidate);
     } catch (error) {
@@ -357,6 +361,7 @@ export async function createChatCompletionStream(
       errorCode?: string,
     ) => {
       const usage = rawUsage === undefined ? undefined : normalizeUsage(rawUsage);
+      if (usage) await options.rateLimit?.onUsage?.(usage);
       const estimatedCostUsd = usage ? estimateCostUsd(usage, candidate.model) : undefined;
       const budgets = await evaluateBudgetPostflight(
         options.config,
@@ -390,14 +395,25 @@ export async function createChatCompletionStream(
       },
       onComplete: async (result) => {
         if (streamBudgetAccounted) return;
-        if (result.status === "success" && result.rawUsage === undefined && hardBudgetRequiresUsage) {
-          throw new GatewayHttpError({
-            status: 402,
-            type: "gateway_budget_error",
-            code: "budget_usage_missing",
-            message: "Provider stream did not include usage required to enforce a hard budget.",
-            raw: { context: budgetContext },
-          });
+        if (result.status === "success" && result.rawUsage === undefined) {
+          if (hardBudgetRequiresUsage) {
+            throw new GatewayHttpError({
+              status: 402,
+              type: "gateway_budget_error",
+              code: "budget_usage_missing",
+              message: "Provider stream did not include usage required to enforce a hard budget.",
+              raw: { context: budgetContext },
+            });
+          }
+          if (rateLimitRequiresUsage) {
+            throw new GatewayHttpError({
+              status: 429,
+              type: "gateway_rate_limit_error",
+              code: "gateway_token_usage_missing",
+              message: "Provider stream did not include usage required to enforce a token rate limit.",
+              raw: { context: budgetContext },
+            });
+          }
         }
         await accountStreamingUsage(result.rawUsage, result.status, result.errorType, result.errorCode);
       },

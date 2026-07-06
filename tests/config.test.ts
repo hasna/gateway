@@ -55,6 +55,44 @@ describe("config validation", () => {
     }
   });
 
+  test("accepts optional per-gateway-key rate limits", () => {
+    const config = testConfig();
+    config.server.rateLimits = {
+      perGatewayKey: {
+        requestsPerMinute: 2,
+        tokensPerMinute: 100,
+      },
+    };
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.server.rateLimits?.perGatewayKey?.requestsPerMinute).toBe(2);
+      expect(result.config.server.rateLimits?.perGatewayKey?.tokensPerMinute).toBe(100);
+    }
+  });
+
+  test("rejects invalid per-gateway-key rate limit values", () => {
+    const result = validateConfig({
+      server: {
+        rateLimits: {
+          perGatewayKey: {
+            requestsPerMinute: 0,
+            // @ts-expect-error exercising runtime config validation
+            tokensPerMinute: "100",
+          },
+        },
+      },
+      presets: ["openai"],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("server.rateLimits.perGatewayKey.requestsPerMinute");
+      expect(result.errors.join("\n")).toContain("server.rateLimits.perGatewayKey.tokensPerMinute");
+    }
+  });
+
   test("interpolates environment placeholders before loading validation", () => {
     const interpolated = interpolateEnvPlaceholders(
       {

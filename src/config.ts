@@ -40,6 +40,18 @@ const serverSchema = z
     maxRequestBodyBytes: z.number().min(1).optional(),
     includeGatewayMetadata: z.boolean().optional(),
     maxFallbackAttempts: z.number().int().min(1).optional(),
+    rateLimits: z
+      .object({
+        perGatewayKey: z
+          .object({
+            requestsPerMinute: z.number().int().min(1).optional(),
+            tokensPerMinute: z.number().int().min(1).optional(),
+          })
+          .passthrough()
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
