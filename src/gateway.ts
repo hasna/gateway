@@ -150,6 +150,16 @@ async function providerErrorFromResponse(candidate: GatewayRouteCandidate, respo
   return providerErrorToGateway(mapped);
 }
 
+async function appendUsageLedgerBestEffort(input: Parameters<typeof appendUsageLedger>[0]): Promise<void> {
+  try {
+    await appendUsageLedger(input);
+  } catch (error) {
+    if ((input.budgets?.length ?? 0) > 0) throw error;
+    // Usage ledger persistence is observability/accounting for already-consumed provider work.
+    // Budget checks remain fail-closed before and after this best-effort write.
+  }
+}
+
 export async function createChatCompletion(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
@@ -229,7 +239,7 @@ export async function createChatCompletion(
         body.gateway = metadataFor(candidate, route.decision, estimatedCostUsd, budgets);
       }
 
-      await appendUsageLedger({
+      await appendUsageLedgerBestEffort({
         config: options.config,
         provider: candidate.provider,
         model: candidate.model,
@@ -382,7 +392,7 @@ export async function createChatCompletionStream(
         spendFromUsage(usage, estimatedCostUsd),
         { env },
       );
-      await appendUsageLedger({
+      await appendUsageLedgerBestEffort({
         config: options.config,
         provider: candidate.provider,
         model: candidate.model,

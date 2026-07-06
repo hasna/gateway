@@ -261,15 +261,24 @@ export async function getBudgetStatuses(
 ): Promise<GatewayBudgetStatus[]> {
   const includeUnmatched = options.includeUnmatched ?? !hasContext(context);
   const now = new Date();
-  const records = hasUsageLedgerBackend(config) ? await readBudgetLedgerRecords(config, { env: options.env }) : [];
   const budgets = options.budgetId ? config.budgets.filter((budget) => budget.id === options.budgetId) : config.budgets;
+  const matchedBudgets = budgets.flatMap((budget) => {
+    const effectiveContext = hasContext(context) ? context : scopeContext(budget);
+    if (!includeUnmatched && !budgetMatchesContext(budget, effectiveContext)) return [];
+    return [{ budget, effectiveContext }];
+  });
+  const needsCumulativeLedger = matchedBudgets.some(({ budget }) => budget.window !== "per-request");
+  if (needsCumulativeLedger) {
+    for (const { budget } of matchedBudgets) {
+      assertLedgerConfiguredForBudget(config, budget);
+    }
+  }
+  const records = needsCumulativeLedger && hasUsageLedgerBackend(config)
+    ? await readBudgetLedgerRecords(config, { env: options.env })
+    : [];
   const statuses: GatewayBudgetStatus[] = [];
 
-  for (const budget of budgets) {
-    const effectiveContext = hasContext(context) ? context : scopeContext(budget);
-    if (!includeUnmatched && !budgetMatchesContext(budget, effectiveContext)) continue;
-    assertLedgerConfiguredForBudget(config, budget);
-
+  for (const { budget, effectiveContext } of matchedBudgets) {
     let spent = { ...zeroSpend };
     for (const record of records) {
       const recordContext = record.context ?? {};

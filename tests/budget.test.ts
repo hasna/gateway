@@ -169,6 +169,120 @@ describe("gateway budgets", () => {
     await removeSqliteFiles(sqlitePath);
   });
 
+  test("does not read cloud ledger storage when no configured budget needs cumulative records", async () => {
+    const cloud = { backend: "postgres" as const, connectionStringEnv: "MISSING_BUDGET_LEDGER_URL" };
+    const noBudgetsConfig = testConfig();
+    noBudgetsConfig.storage.cloud = cloud;
+    noBudgetsConfig.budgets = [];
+
+    await expect(getBudgetStatuses(noBudgetsConfig, {
+      tenant: "acme",
+      requestedModel: "coding",
+      selectedModel: "openai/gpt-4.1-mini",
+    })).resolves.toEqual([]);
+
+    const budgetIdMissConfig = testConfig();
+    budgetIdMissConfig.storage.cloud = cloud;
+    budgetIdMissConfig.budgets = [
+      {
+        id: "tenant-daily",
+        window: "daily",
+        mode: "hard",
+        scope: { tenant: "acme", modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    await expect(getBudgetStatuses(
+      budgetIdMissConfig,
+      {
+        tenant: "acme",
+        requestedModel: "coding",
+        selectedModel: "openai/gpt-4.1-mini",
+      },
+      { budgetId: "missing-budget" },
+    )).resolves.toEqual([]);
+
+    const perRequestConfig = testConfig();
+    perRequestConfig.storage.cloud = cloud;
+    perRequestConfig.budgets = [
+      {
+        id: "per-request-only",
+        window: "per-request",
+        mode: "hard",
+        scope: { tenant: "acme", modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    const [status] = await getBudgetStatuses(perRequestConfig, {
+      tenant: "acme",
+      requestedModel: "coding",
+      selectedModel: "openai/gpt-4.1-mini",
+    });
+    expect(status?.budget.id).toBe("per-request-only");
+    expect(status?.spent.totalTokens).toBe(0);
+    expect(status?.remaining.totalTokens).toBe(100);
+  });
+
+  test("still reads cloud ledger storage for matched cumulative budgets", async () => {
+    const config = testConfig();
+    config.storage.cloud = { backend: "postgres", connectionStringEnv: "MISSING_BUDGET_LEDGER_URL" };
+    config.budgets = [
+      {
+        id: "tenant-daily",
+        window: "daily",
+        mode: "hard",
+        scope: { tenant: "acme", modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    await expect(getBudgetStatuses(config, {
+      tenant: "acme",
+      requestedModel: "coding",
+      selectedModel: "openai/gpt-4.1-mini",
+    })).rejects.toMatchObject({
+      status: 500,
+    });
+  });
+
+  test("fails closed when a budgeted response cannot be persisted to the cloud ledger", async () => {
+    const config = testConfig();
+    config.storage.cloud = { backend: "postgres", connectionStringEnv: "MISSING_BUDGET_LEDGER_URL" };
+    config.budgets = [
+      {
+        id: "per-request-budgeted",
+        window: "per-request",
+        mode: "hard",
+        scope: { modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    let providerCalls = 0;
+    await expect(createChatCompletion(
+      {
+        config,
+        env: testEnv(),
+        fetchImpl: async () => {
+          providerCalls += 1;
+          return jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+          });
+        },
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "budgeted cloud append should fail closed" }],
+      },
+    )).rejects.toMatchObject({
+      status: 500,
+    });
+    expect(providerCalls).toBe(1);
+  });
+
   test("blocks a second request before provider fetch when a hard token budget is exhausted", async () => {
     const path = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.jsonl`;
     const config = testConfig();
