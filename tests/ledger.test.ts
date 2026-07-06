@@ -139,4 +139,38 @@ describe("usage ledger", () => {
     expect(JSON.stringify(records)).not.toContain("do not write this cloud prompt");
     await removeSqliteFiles(sqlitePath);
   });
+
+  test("keeps a successful provider response when cloud ledger append fails", async () => {
+    const config = testConfig();
+    config.storage.cloud = { backend: "postgres", connectionStringEnv: "MISSING_LEDGER_DATABASE_URL" };
+    let providerCalls = 0;
+
+    const result = await createChatCompletion(
+      {
+        config,
+        env: testEnv(),
+        fetchImpl: async () => {
+          providerCalls += 1;
+          return jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+          });
+        },
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "do not leak failed cloud prompt" }],
+      },
+    );
+
+    expect(providerCalls).toBe(1);
+    expect(result.status).toBe(200);
+    expect(result.body.usage).toEqual({
+      prompt_tokens: 4,
+      completion_tokens: 2,
+      total_tokens: 6,
+    });
+    expect(JSON.stringify(result.body)).not.toContain("do not leak failed cloud prompt");
+    expect(JSON.stringify(result.body)).not.toContain("MISSING_LEDGER_DATABASE_URL");
+  });
 });
