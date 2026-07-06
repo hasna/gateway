@@ -1,7 +1,6 @@
-import { dirname } from "node:path";
-import { appendFile, mkdir } from "node:fs/promises";
 import type { GatewayConfig, GatewayModelConfig, GatewayProviderConfig, GatewayRouteDecision, GatewayUsage } from "./types";
 import type { GatewayBudgetContext, GatewayBudgetStatus } from "./budget";
+import { appendUsageLedgerRecord } from "./storage";
 
 export type GatewayUsageLedgerRecord = {
   timestamp: string;
@@ -37,10 +36,8 @@ export async function appendUsageLedger(input: {
   status: "success" | "error";
   errorType?: string;
   errorCode?: string;
+  env?: Record<string, string | undefined>;
 }): Promise<void> {
-  const path = input.config.storage.usageLedgerPath;
-  if (!path) return;
-
   const record: GatewayUsageLedgerRecord = {
     timestamp: new Date().toISOString(),
     provider: input.provider.id,
@@ -77,6 +74,5 @@ export async function appendUsageLedger(input: {
     ...(input.errorCode ? { errorCode: input.errorCode } : {}),
   };
 
-  await mkdir(dirname(path), { recursive: true });
-  await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
+  await appendUsageLedgerRecord(input.config, record, { env: input.env });
 }

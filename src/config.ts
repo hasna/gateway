@@ -53,6 +53,18 @@ const authSchema = z
 const storageSchema = z
   .object({
     usageLedgerPath: z.string().min(1).optional(),
+    cloud: z
+      .discriminatedUnion("backend", [
+        z.object({ backend: z.literal("sqlite"), sqlitePath: z.string().min(1) }).passthrough(),
+        z
+          .object({
+            backend: z.literal("postgres"),
+            connectionString: z.string().min(1).optional(),
+            connectionStringEnv: z.string().min(1).optional(),
+          })
+          .passthrough(),
+      ])
+      .optional(),
   })
   .passthrough();
 
@@ -353,6 +365,18 @@ function assertNumber(value: unknown, label: string, errors: string[], min?: num
   }
 }
 
+function assertCloudStorage(config: GatewayConfig, errors: string[]): void {
+  const cloud = config.storage.cloud;
+  if (!cloud) return;
+  if (cloud.backend === "sqlite") {
+    assertString(cloud.sqlitePath, "storage.cloud.sqlitePath", errors);
+    return;
+  }
+  if (!cloud.connectionString && !cloud.connectionStringEnv) {
+    errors.push("storage.cloud postgres backend requires connectionString or connectionStringEnv.");
+  }
+}
+
 export function validateConfig(input: GatewayConfigInput): GatewayConfigValidationResult {
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -377,6 +401,7 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
   assertNumber(config.server.maxRequestBodyBytes, "server.maxRequestBodyBytes", errors, 1);
   assertNumber(config.server.maxFallbackAttempts, "server.maxFallbackAttempts", errors, 1);
   assertString(config.auth.apiKeyEnv, "auth.apiKeyEnv", errors);
+  assertCloudStorage(config, errors);
 
   const providerIds = new Set<string>();
   for (const provider of config.providers) {
@@ -443,8 +468,8 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
     ) {
       errors.push(`budget ${budget.id} must define at least one money or token limit.`);
     }
-    if (budget.window !== "per-request" && !config.storage.usageLedgerPath) {
-      errors.push(`budget ${budget.id} uses a ${budget.window} window and requires storage.usageLedgerPath.`);
+    if (budget.window !== "per-request" && !config.storage.usageLedgerPath && !config.storage.cloud) {
+      errors.push(`budget ${budget.id} uses a ${budget.window} window and requires a usage ledger backend.`);
     }
   }
 

@@ -37,7 +37,7 @@ describe("config validation", () => {
     }
   });
 
-  test("rejects cumulative budgets without a usage ledger path", () => {
+  test("rejects cumulative budgets without a usage ledger backend", () => {
     const config = testConfig();
     config.budgets = [
       {
@@ -51,7 +51,39 @@ describe("config validation", () => {
     const result = validateConfig(config);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors.join("\n")).toContain("requires storage.usageLedgerPath");
+      expect(result.errors.join("\n")).toContain("requires a usage ledger backend");
+    }
+  });
+
+  test("accepts cumulative budgets with a cloud sqlite ledger backend", () => {
+    const config = testConfig();
+    config.storage.cloud = {
+      backend: "sqlite",
+      sqlitePath: `/tmp/hasna-gateway-config-${crypto.randomUUID()}.sqlite`,
+    };
+    config.budgets = [
+      {
+        id: "daily",
+        window: "daily",
+        mode: "hard",
+        maxTotalTokens: 100,
+      },
+    ];
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(true);
+  });
+
+  test("rejects postgres cloud ledger backend without a connection source", () => {
+    const config = testConfig();
+    config.storage.cloud = {
+      backend: "postgres",
+    };
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("requires connectionString or connectionStringEnv");
     }
   });
 

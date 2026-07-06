@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { GatewayBudgetConfig, GatewayConfig, GatewayUsage, OpenAIChatCompletionRequest } from "./types";
 import { GatewayHttpError } from "./errors";
+import { hasUsageLedgerBackend, readBudgetLedgerRecords } from "./storage";
 
 export type GatewayBudgetContext = {
   gatewayKey?: string;
@@ -161,27 +162,6 @@ function spendFromRecord(record: LedgerLikeRecord): GatewayBudgetSpend {
   };
 }
 
-async function readLedger(path: string | undefined): Promise<LedgerLikeRecord[]> {
-  if (!path) return [];
-  let text = "";
-  try {
-    text = await Bun.file(path).text();
-  } catch {
-    return [];
-  }
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        return [JSON.parse(line) as LedgerLikeRecord];
-      } catch {
-        return [];
-      }
-    });
-}
-
 function remainingValue(limit: number | undefined, spent: number): number | undefined {
   return limit === undefined ? undefined : Math.max(0, roundMoney(limit - spent));
 }
@@ -259,12 +239,12 @@ function buildStatus(budget: GatewayBudgetConfig, context: GatewayBudgetContext,
 }
 
 function assertLedgerConfiguredForBudget(config: GatewayConfig, budget: GatewayBudgetConfig): void {
-  if (budget.window === "per-request" || config.storage.usageLedgerPath) return;
+  if (budget.window === "per-request" || hasUsageLedgerBackend(config)) return;
   throw new GatewayHttpError({
     status: 500,
     type: "gateway_config_error",
     code: "budget_ledger_missing",
-    message: `Budget '${budget.id}' uses a ${budget.window} window and requires storage.usageLedgerPath for cumulative enforcement.`,
+    message: `Budget '${budget.id}' uses a ${budget.window} window and requires a usage ledger backend for cumulative enforcement.`,
     raw: budget,
   });
 }
@@ -272,11 +252,16 @@ function assertLedgerConfiguredForBudget(config: GatewayConfig, budget: GatewayB
 export async function getBudgetStatuses(
   config: GatewayConfig,
   context: GatewayBudgetContext = {},
-  options: { budgetId?: string; includeUnmatched?: boolean; currentSpend?: GatewayBudgetSpend } = {},
+  options: {
+    budgetId?: string;
+    includeUnmatched?: boolean;
+    currentSpend?: GatewayBudgetSpend;
+    env?: Record<string, string | undefined>;
+  } = {},
 ): Promise<GatewayBudgetStatus[]> {
   const includeUnmatched = options.includeUnmatched ?? !hasContext(context);
   const now = new Date();
-  const records = config.storage.usageLedgerPath ? await readLedger(config.storage.usageLedgerPath) : [];
+  const records = hasUsageLedgerBackend(config) ? await readBudgetLedgerRecords(config, { env: options.env }) : [];
   const budgets = options.budgetId ? config.budgets.filter((budget) => budget.id === options.budgetId) : config.budgets;
   const statuses: GatewayBudgetStatus[] = [];
 
@@ -311,8 +296,12 @@ function budgetExceededMessage(status: GatewayBudgetStatus): string {
   return `Budget '${status.budget.id}' exceeded${details.length ? ` (${details.join(", ")})` : ""}.`;
 }
 
-export async function assertBudgetPreflight(config: GatewayConfig, context: GatewayBudgetContext): Promise<GatewayBudgetStatus[]> {
-  const statuses = await getBudgetStatuses(config, context, { includeUnmatched: false });
+export async function assertBudgetPreflight(
+  config: GatewayConfig,
+  context: GatewayBudgetContext,
+  options: { env?: Record<string, string | undefined> } = {},
+): Promise<GatewayBudgetStatus[]> {
+  const statuses = await getBudgetStatuses(config, context, { includeUnmatched: false, env: options.env });
   const blocked = statuses.find((status) => status.budget.mode === "hard" && status.exhausted);
   if (blocked) {
     throw new GatewayHttpError({
@@ -330,8 +319,9 @@ export async function evaluateBudgetPostflight(
   config: GatewayConfig,
   context: GatewayBudgetContext,
   currentSpend: GatewayBudgetSpend,
+  options: { env?: Record<string, string | undefined> } = {},
 ): Promise<GatewayBudgetStatus[]> {
-  return getBudgetStatuses(config, context, { includeUnmatched: false, currentSpend });
+  return getBudgetStatuses(config, context, { includeUnmatched: false, currentSpend, env: options.env });
 }
 
 export function assertBudgetPostflight(statuses: GatewayBudgetStatus[]): void {

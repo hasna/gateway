@@ -154,8 +154,9 @@ export async function createChatCompletion(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
 ): Promise<CompletionResult> {
+  const env = options.env ?? process.env;
   const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
-  await assertBudgetPreflight(options.config, requestBudgetContext);
+  await assertBudgetPreflight(options.config, requestBudgetContext, { env });
   const route = resolveRoute(options, request);
   const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
   let lastError: GatewayHttpError | undefined;
@@ -164,7 +165,7 @@ export async function createChatCompletion(
     const started = Date.now();
     const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     try {
-      await assertBudgetPreflight(options.config, budgetContext);
+      await assertBudgetPreflight(options.config, budgetContext, { env });
       const response = await callProvider(options, request, candidate);
       const latencyMs = Date.now() - started;
 
@@ -203,6 +204,7 @@ export async function createChatCompletion(
         options.config,
         budgetContext,
         spendFromUsage(usage, estimatedCostUsd),
+        { env },
       );
       const body: Record<string, unknown> = {
         ...providerJson,
@@ -227,6 +229,7 @@ export async function createChatCompletion(
         estimatedCostUsd,
         budgets,
         status: "success",
+        env,
       });
 
       assertBudgetPostflight(budgets);
@@ -278,8 +281,9 @@ export async function createChatCompletionStream(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
 ): Promise<Response> {
+  const env = options.env ?? process.env;
   const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
-  await assertBudgetPreflight(options.config, requestBudgetContext);
+  await assertBudgetPreflight(options.config, requestBudgetContext, { env });
   const route = resolveRoute(options, request);
   const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
   let lastError: GatewayHttpError | undefined;
@@ -290,7 +294,7 @@ export async function createChatCompletionStream(
     const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     let hardBudgetRequiresUsage = false;
     try {
-      const budgetStatuses = await assertBudgetPreflight(options.config, budgetContext);
+      const budgetStatuses = await assertBudgetPreflight(options.config, budgetContext, { env });
       const budgetedRequest = budgetStatuses.length > 0 ? requestWithStreamingUsage(request) : request;
       hardBudgetRequiresUsage = budgetStatuses.some((status) => status.budget.mode === "hard");
       response = await openProviderStream(options, budgetedRequest, candidate);
@@ -362,6 +366,7 @@ export async function createChatCompletionStream(
         options.config,
         budgetContext,
         spendFromUsage(usage, estimatedCostUsd),
+        { env },
       );
       await appendUsageLedger({
         config: options.config,
@@ -375,6 +380,7 @@ export async function createChatCompletionStream(
         status,
         errorType,
         errorCode,
+        env,
       });
       streamBudgetAccounted = true;
       if (status === "success") assertBudgetPostflight(budgets);

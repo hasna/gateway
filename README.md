@@ -66,7 +66,10 @@ After installation as a package, the CLI binary is `gateway`:
 
 ```bash
 gateway serve --config gateway.config.json
+gateway-mcp --config gateway.config.json
 ```
+
+`gateway-mcp` is a stdio MCP server for local agents. It validates and inspects config, explains route choices without provider calls, manages budget definitions, checks remaining budgets, and summarizes the configured usage ledger. Long-running `serve` and live `smoke` checks stay CLI-only. See [Gateway MCP server](docs/mcp.md).
 
 ## Configuration
 
@@ -78,7 +81,7 @@ Required config examples:
 
 Provider keys are loaded from environment variables only. Do not put provider secrets in config files.
 
-Budgets live in the same JSON config and spend is calculated from the local usage ledger. Daily, monthly, and lifetime budgets require `storage.usageLedgerPath`; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
+Budgets live in the same JSON config and spend is calculated from the usage ledger. JSONL append through `storage.usageLedgerPath` is the local-first default. Daily, monthly, and lifetime budgets require either `storage.usageLedgerPath` or an explicit `storage.cloud` backend; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
 
 ## Documentation
 
@@ -88,6 +91,7 @@ Budgets live in the same JSON config and spend is calculated from the local usag
 - [Provider adapters](docs/provider-adapters.md)
 - [2026 provider references](docs/provider-references.md)
 - [Routing and policy](docs/routing-and-policy.md)
+- [Gateway MCP server](docs/mcp.md)
 - [Open-core boundary](docs/open-core-boundary.md)
 - [Security and compliance](docs/security-compliance.md)
 - [Implementation plan](docs/implementation-plan.md)
@@ -97,6 +101,6 @@ Budgets live in the same JSON config and spend is calculated from the local usag
 
 ## Status
 
-The gateway core is implemented and locally verified for the first release surface: CLI server, health/models/chat endpoints, OpenAI-compatible provider adapter, provider presets, routing policy, fallbacks, streaming, usage normalization, optional local ledger, examples, tests, build, and package dry-run.
+The gateway core is implemented and locally verified for the first release surface: CLI server, MCP server, health/models/chat endpoints, OpenAI-compatible provider adapter, provider presets, routing policy, fallbacks, streaming, usage normalization, optional local ledger, examples, tests, build, and package dry-run.
 
 Publication is gated on a passing live smoke check with valid provider credentials.
