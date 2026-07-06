@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { GatewayHttpError, providerErrorToGateway } from "./errors";
 import { appendUsageLedger } from "./ledger";
 import {
@@ -23,6 +24,13 @@ type CompletionResult = {
   status: number;
   decision: GatewayRouteDecision;
 };
+
+type CachedCompletion = {
+  expiresAt: number;
+  result: CompletionResult;
+};
+
+const responseCacheStores = new WeakMap<GatewayRuntimeOptions["config"], Map<string, CachedCompletion>>();
 
 function metadataFor(
   candidate: GatewayRouteCandidate,
@@ -53,6 +61,115 @@ function metadataFor(
 function includeGatewayMetadata(options: GatewayRuntimeOptions, request: OpenAIChatCompletionRequest): boolean {
   if (request.gateway?.strict_openai_compatibility) return false;
   return request.gateway?.include_gateway_metadata ?? options.config.server.includeGatewayMetadata;
+}
+
+function normalizedCacheValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(normalizedCacheValue);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, item]) => item !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, normalizedCacheValue(item)]),
+    );
+  }
+  return value;
+}
+
+function stableCacheJson(value: unknown): string {
+  return JSON.stringify(normalizedCacheValue(value));
+}
+
+function stableCacheHash(value: unknown): string {
+  return createHash("sha256").update(stableCacheJson(value)).digest("hex");
+}
+
+function cacheRelevantRequestFields(request: OpenAIChatCompletionRequest): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(request).filter(([key, value]) => {
+      if (value === undefined) return false;
+      return key !== "model" && key !== "messages" && key !== "stream" && key !== "gateway";
+    }),
+  );
+}
+
+function responseCacheKey(
+  options: GatewayRuntimeOptions,
+  request: OpenAIChatCompletionRequest,
+  candidate: GatewayRouteCandidate,
+  isolation: { gatewayKey?: string; tenant?: string },
+): string {
+  return stableCacheHash({
+    gatewayHash: stableCacheHash(request.gateway ?? null),
+    gatewayKey: isolation.gatewayKey ?? null,
+    includeGatewayMetadata: includeGatewayMetadata(options, request),
+    messagesHash: stableCacheHash(request.messages),
+    model: candidate.model.id,
+    requestHash: stableCacheHash(cacheRelevantRequestFields(request)),
+    requestedModel: request.model,
+    tenant: isolation.tenant ?? null,
+  });
+}
+
+function responseCacheEnabled(options: GatewayRuntimeOptions): boolean {
+  const cache = options.config.server.responseCache;
+  return cache.enabled && cache.ttlMs > 0 && cache.maxEntries > 0;
+}
+
+function responseCacheStore(options: GatewayRuntimeOptions): Map<string, CachedCompletion> {
+  let store = responseCacheStores.get(options.config);
+  if (!store) {
+    store = new Map();
+    responseCacheStores.set(options.config, store);
+  }
+  return store;
+}
+
+function cloneCompletionResult(result: CompletionResult): CompletionResult {
+  return {
+    body: structuredClone(result.body),
+    status: result.status,
+    decision: structuredClone(result.decision),
+  };
+}
+
+function pruneResponseCache(options: GatewayRuntimeOptions, store: Map<string, CachedCompletion>, now: number): void {
+  for (const [key, cached] of store) {
+    if (cached.expiresAt <= now) {
+      store.delete(key);
+    }
+  }
+
+  while (store.size >= options.config.server.responseCache.maxEntries) {
+    const oldestKey = store.keys().next().value;
+    if (oldestKey === undefined) return;
+    store.delete(oldestKey);
+  }
+}
+
+function readResponseCache(options: GatewayRuntimeOptions, key: string): CompletionResult | undefined {
+  if (!responseCacheEnabled(options) || options.requestContext?.responseCacheBypass) return undefined;
+  const store = responseCacheStore(options);
+  const cached = store.get(key);
+  if (!cached) return undefined;
+  if (cached.expiresAt <= Date.now()) {
+    store.delete(key);
+    return undefined;
+  }
+  return cloneCompletionResult(cached.result);
+}
+
+function writeResponseCache(options: GatewayRuntimeOptions, key: string, result: CompletionResult): void {
+  if (!responseCacheEnabled(options)) return;
+  const now = Date.now();
+  const store = responseCacheStore(options);
+  pruneResponseCache(options, store, now);
+  store.set(key, {
+    expiresAt: now + options.config.server.responseCache.ttlMs,
+    result: cloneCompletionResult(result),
+  });
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {
@@ -176,6 +293,12 @@ export async function createChatCompletion(
     const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     try {
       await assertBudgetPreflight(options.config, budgetContext, { env });
+      const cacheKey = responseCacheKey(options, request, candidate, budgetContext);
+      const cachedResult = readResponseCache(options, cacheKey);
+      if (cachedResult) {
+        return cachedResult;
+      }
+
       const response = await callProvider(options, request, candidate);
       const latencyMs = Date.now() - started;
 
@@ -253,7 +376,9 @@ export async function createChatCompletion(
       });
 
       assertBudgetPostflight(budgets);
-      return { body, status: 200, decision: route.decision };
+      const result = { body, status: 200, decision: route.decision };
+      writeResponseCache(options, cacheKey, result);
+      return result;
     } catch (error) {
       const gatewayError =
         error instanceof GatewayHttpError

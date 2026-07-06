@@ -45,10 +45,12 @@ function corsHeaders(request: Request, config: GatewayConfig): HeadersInit {
   if (origin && !config.server.corsAllowedOrigins.includes(origin)) {
     return {};
   }
+  const allowedHeaders = new Set(["authorization", "content-type", "x-gateway-tenant"]);
+  allowedHeaders.add(config.server.responseCache.bypassHeader.toLowerCase());
   return {
     ...(origin ? { "access-control-allow-origin": origin, vary: "origin" } : {}),
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "authorization,content-type",
+    "access-control-allow-headers": [...allowedHeaders].join(","),
     "access-control-expose-headers": "retry-after",
   };
 }
@@ -139,6 +141,13 @@ function validateChatRequest(body: unknown): OpenAIChatCompletionRequest {
   }
 
   return request;
+}
+
+function responseCacheBypassRequested(request: Request, config: GatewayConfig): boolean {
+  const value = request.headers.get(config.server.responseCache.bypassHeader);
+  if (value === null) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "" || !["0", "false", "no", "off"].includes(normalized);
 }
 
 function modelsResponse(config: GatewayConfig): Record<string, unknown> {
@@ -306,6 +315,9 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
           rateLimit: {
             onUsage: (usage) => keyRateLimiter.recordUsage(rateLimitKey, rateLimitConfig, usage),
             requiresStreamingUsage: rateLimitConfig?.tokensPerMinute !== undefined,
+          },
+          requestContext: {
+            responseCacheBypass: responseCacheBypassRequested(request, options.config),
           },
         };
         if (body.stream) {
