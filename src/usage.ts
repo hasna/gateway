@@ -14,11 +14,17 @@ export function normalizeUsage(raw: unknown): GatewayUsage {
   const usage = objectFrom(raw);
   const promptDetails = objectFrom(usage.prompt_tokens_details);
   const completionDetails = objectFrom(usage.completion_tokens_details);
-  const cacheDetails = objectFrom(usage.cache_creation_input_tokens);
+  const anthropicInputTokens = numberFrom(usage.input_tokens);
+  const anthropicCacheReadInputTokens = numberFrom(usage.cache_read_input_tokens);
+  const anthropicCacheCreationInputTokens = numberFrom(usage.cache_creation_input_tokens);
 
+  // Anthropic reports uncached input, cache creation, and cache reads separately.
+  // OpenAI-compatible prompt_tokens should include all prompt-side tokens.
   const inputTokens =
     numberFrom(usage.prompt_tokens) ??
-    numberFrom(usage.input_tokens) ??
+    (anthropicInputTokens === undefined
+      ? undefined
+      : anthropicInputTokens + (anthropicCacheReadInputTokens ?? 0) + (anthropicCacheCreationInputTokens ?? 0)) ??
     numberFrom(usage.inputTokens) ??
     0;
   const outputTokens =
@@ -26,16 +32,14 @@ export function normalizeUsage(raw: unknown): GatewayUsage {
     numberFrom(usage.output_tokens) ??
     numberFrom(usage.outputTokens) ??
     0;
-  const totalTokens =
-    numberFrom(usage.total_tokens) ??
-    numberFrom(usage.totalTokens) ??
-    inputTokens + outputTokens;
+  const computedTotalTokens = inputTokens + outputTokens;
+  const explicitTotalTokens = numberFrom(usage.total_tokens) ?? numberFrom(usage.totalTokens);
+  const totalTokens = explicitTotalTokens === undefined ? computedTotalTokens : Math.max(explicitTotalTokens, computedTotalTokens);
 
   const cachedInputTokens =
     numberFrom(promptDetails.cached_tokens) ??
     numberFrom(usage.cached_input_tokens) ??
-    numberFrom(usage.cache_read_input_tokens) ??
-    numberFrom(cacheDetails.cached_tokens);
+    anthropicCacheReadInputTokens;
   const reasoningTokens =
     numberFrom(completionDetails.reasoning_tokens) ??
     numberFrom(usage.reasoning_tokens) ??

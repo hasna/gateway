@@ -27,6 +27,44 @@ describe("usage normalization", () => {
     });
   });
 
+  test("normalizes Anthropic cache usage without undercounting prompt totals", () => {
+    const usage = normalizeUsage({
+      input_tokens: 11,
+      output_tokens: 4,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 6,
+    });
+
+    expect(usage).toMatchObject({
+      inputTokens: 20,
+      outputTokens: 4,
+      totalTokens: 24,
+      cachedInputTokens: 3,
+    });
+    expect(toOpenAIUsage(usage)).toEqual({
+      prompt_tokens: 20,
+      completion_tokens: 4,
+      total_tokens: 24,
+      prompt_tokens_details: { cached_tokens: 3 },
+    });
+  });
+
+  test("does not let explicit total usage undercount normalized tokens", () => {
+    const usage = normalizeUsage({
+      input_tokens: 11,
+      output_tokens: 4,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 6,
+      total_tokens: 15,
+    });
+
+    expect(toOpenAIUsage(usage)).toMatchObject({
+      prompt_tokens: 20,
+      completion_tokens: 4,
+      total_tokens: 24,
+    });
+  });
+
   test("estimates configured cost", () => {
     const usage = normalizeUsage({ prompt_tokens: 1000, completion_tokens: 500, total_tokens: 1500 });
     expect(
@@ -40,6 +78,27 @@ describe("usage normalization", () => {
         outputUsdPerMillionTokens: 1.6,
       }),
     ).toBe(0.0012);
+  });
+
+  test("estimates configured cost from normalized Anthropic cache usage", () => {
+    const usage = normalizeUsage({
+      input_tokens: 11,
+      output_tokens: 4,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 6,
+    });
+
+    expect(
+      estimateCostUsd(usage, {
+        id: "anthropic/claude-3-5-sonnet",
+        providerId: "anthropic",
+        providerModel: "claude-3-5-sonnet-latest",
+        aliases: [],
+        capabilities: ["chat"],
+        inputUsdPerMillionTokens: 3,
+        outputUsdPerMillionTokens: 15,
+      }),
+    ).toBe(0.000111);
   });
 
   test("returns unknown cost when a used token side has no configured price", () => {
