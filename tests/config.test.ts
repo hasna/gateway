@@ -160,11 +160,18 @@ describe("config validation", () => {
   });
 
   test("expands presets", () => {
-    const result = validateConfig({ presets: ["openai", "deepseek"] });
+    const result = validateConfig({ presets: ["openai", "google", "deepseek"] });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.config.providers.map((provider) => provider.id)).toContain("openai");
+      expect(result.config.providers.map((provider) => provider.id)).toContain("google");
       expect(result.config.providers.map((provider) => provider.id)).toContain("deepseek");
+      expect(result.config.providers.find((provider) => provider.id === "google")?.dataPolicy).toMatchObject({
+        allowTraining: true,
+        allowLogging: true,
+        byokOnly: true,
+      });
+      expect(result.config.models.some((model) => model.providerId === "google")).toBe(true);
       expect(result.config.models.some((model) => model.providerId === "deepseek")).toBe(true);
     }
   });

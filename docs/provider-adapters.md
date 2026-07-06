@@ -38,7 +38,9 @@ Anthropic has a different message and streaming format. The adapter should conve
 
 ### Google
 
-Google Gemini has different content, tool, safety, and streaming shapes. The adapter should be implemented after the OpenAI-compatible and Anthropic adapters are stable.
+Google Gemini can be reached through Google's OpenAI-compatible chat completions endpoint for the first gateway adapter. Native Gemini `generateContent` support can still be added later for provider-specific content, tool, safety, and streaming controls.
+
+The built-in `google` preset is intentionally conservative about data policy. Operators should explicitly allow the required provider logging/training policy in a route, or override the provider policy after verifying the account tier and Google terms for their own key.
 
 ### OpenRouter
 

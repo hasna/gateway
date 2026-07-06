@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { OpenAICompatibleAdapter, toProviderChatBody } from "../src/providers";
+import {
+  GoogleGeminiAdapter,
+  googleGeminiOpenAIBaseUrl,
+  OpenAICompatibleAdapter,
+  toProviderChatBody,
+} from "../src/providers";
 import { testConfig } from "./helpers";
 
 describe("OpenAI-compatible provider adapter", () => {
@@ -62,5 +67,46 @@ describe("OpenAI-compatible provider adapter", () => {
     expect(request.url).toBe("https://api.openai.test/v1/chat/completions");
     expect((request.init.headers as Record<string, string>).authorization).toBe("Bearer secret");
     expect(JSON.parse(String(request.init.body)).model).toBe("gpt-4.1-mini");
+  });
+});
+
+describe("Google Gemini provider adapter", () => {
+  test("builds a Gemini OpenAI-compatible bearer request", () => {
+    const adapter = new GoogleGeminiAdapter();
+    const request = adapter.buildRequest({
+      provider: {
+        id: "google",
+        displayName: "Google Gemini",
+        kind: "google",
+        apiKeyEnv: "GOOGLE_GENERATIVE_AI_API_KEY",
+      },
+      model: {
+        id: "google/gemini-3.5-flash",
+        providerId: "google",
+        providerModel: "gemini-3.5-flash",
+        aliases: ["gemini"],
+        capabilities: ["chat", "streaming", "tools", "json"],
+      },
+      request: {
+        model: "gemini",
+        messages: [
+          { role: "system", content: "Be concise." },
+          { role: "user", content: "hi" },
+        ],
+        gateway: { routing: "explicit" },
+      },
+      apiKey: "google-key",
+      timeoutMs: 1000,
+    });
+
+    expect(request.url).toBe(`${googleGeminiOpenAIBaseUrl}/chat/completions`);
+    expect((request.init.headers as Record<string, string>).authorization).toBe("Bearer google-key");
+    expect(JSON.parse(String(request.init.body))).toEqual({
+      model: "gemini-3.5-flash",
+      messages: [
+        { role: "system", content: "Be concise." },
+        { role: "user", content: "hi" },
+      ],
+    });
   });
 });
