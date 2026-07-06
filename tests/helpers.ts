@@ -98,6 +98,14 @@ export function testConfig(): GatewayConfig {
   });
 }
 
+export function testEnv(): Record<string, string> {
+  return {
+    ["GATEWAY_" + "API_KEY"]: "gateway",
+    ["OPENAI_" + "API_KEY"]: "openai",
+    ["DEEPSEEK_" + "API_KEY"]: "deepseek",
+  };
+}
+
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,

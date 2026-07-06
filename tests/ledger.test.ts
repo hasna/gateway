@@ -1,7 +1,16 @@
 import { unlink } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import { createChatCompletion, createChatCompletionStream } from "../src/gateway";
-import { jsonResponse, testConfig } from "./helpers";
+import { readUsageLedgerRecords } from "../src/storage";
+import { jsonResponse, testConfig, testEnv } from "./helpers";
+
+async function removeSqliteFiles(path: string): Promise<void> {
+  await Promise.all([
+    unlink(path).catch(() => undefined),
+    unlink(`${path}-shm`).catch(() => undefined),
+    unlink(`${path}-wal`).catch(() => undefined),
+  ]);
+}
 
 describe("usage ledger", () => {
   test("writes sanitized local JSONL records when enabled", async () => {
@@ -12,7 +21,7 @@ describe("usage ledger", () => {
     await createChatCompletion(
       {
         config,
-        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        env: testEnv(),
         fetchImpl: async () =>
           jsonResponse({
             choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
@@ -41,7 +50,7 @@ describe("usage ledger", () => {
     const response = await createChatCompletionStream(
       {
         config,
-        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        env: testEnv(),
         fetchImpl: async () =>
           new Response(
             [
@@ -80,7 +89,7 @@ describe("usage ledger", () => {
     const response = await createChatCompletionStream(
       {
         config,
-        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        env: testEnv(),
         fetchImpl: async () => new Response("data: not-json\n\n", { headers: { "content-type": "text/event-stream" } }),
       },
       {
@@ -98,5 +107,36 @@ describe("usage ledger", () => {
     expect(record.errorCode).toBe("provider_stream_invalid_chunk");
     expect(text).not.toContain("do not write malformed prompt");
     await unlink(path);
+  });
+
+  test("writes cloud sqlite ledger records across reopened configs when enabled", async () => {
+    const sqlitePath = `/tmp/hasna-gateway-ledger-${crypto.randomUUID()}.sqlite`;
+    const config = testConfig();
+    config.storage.cloud = { backend: "sqlite", sqlitePath };
+
+    await createChatCompletion(
+      {
+        config,
+        env: testEnv(),
+        fetchImpl: async () =>
+          jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+          }),
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "do not write this cloud prompt" }],
+      },
+    );
+
+    const reopenedConfig = testConfig();
+    reopenedConfig.storage.cloud = { backend: "sqlite", sqlitePath };
+    const records = await readUsageLedgerRecords(reopenedConfig);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.provider).toBe("openai");
+    expect(records[0]?.usage?.totalTokens).toBe(5);
+    expect(JSON.stringify(records)).not.toContain("do not write this cloud prompt");
+    await removeSqliteFiles(sqlitePath);
   });
 });

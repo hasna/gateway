@@ -94,8 +94,20 @@ export type GatewayGlobalPolicy = GatewayDataPolicy & {
   allowRequestPolicyExpansion?: boolean;
 };
 
+export type GatewayCloudStorageConfig =
+  | {
+      backend: "sqlite";
+      sqlitePath: string;
+    }
+  | {
+      backend: "postgres";
+      connectionString?: string;
+      connectionStringEnv?: string;
+    };
+
 export type GatewayStorageConfig = {
   usageLedgerPath?: string;
+  cloud?: GatewayCloudStorageConfig;
 };
 
 export type GatewayBudgetWindow = "per-request" | "daily" | "monthly" | "lifetime";

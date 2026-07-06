@@ -59,7 +59,7 @@ gateway serve --config gateway.config.json
 gateway-mcp --config gateway.config.json
 ```
 
-`gateway-mcp` is a stdio MCP server for local agents. It validates and inspects config, explains route choices without provider calls, manages budget definitions, checks remaining budgets, and summarizes the local usage ledger. Long-running `serve` and live `smoke` checks stay CLI-only. See [Gateway MCP server](docs/mcp.md).
+`gateway-mcp` is a stdio MCP server for local agents. It validates and inspects config, explains route choices without provider calls, manages budget definitions, checks remaining budgets, and summarizes the configured usage ledger. Long-running `serve` and live `smoke` checks stay CLI-only. See [Gateway MCP server](docs/mcp.md).
 
 ## Configuration
 
@@ -71,7 +71,7 @@ Required config examples:
 
 Provider keys are loaded from environment variables only. Do not put provider secrets in config files.
 
-Budgets live in the same JSON config and spend is calculated from the local usage ledger. Daily, monthly, and lifetime budgets require `storage.usageLedgerPath`; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
+Budgets live in the same JSON config and spend is calculated from the usage ledger. JSONL append through `storage.usageLedgerPath` is the local-first default. Daily, monthly, and lifetime budgets require either `storage.usageLedgerPath` or an explicit `storage.cloud` backend; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
 
 ## Documentation
 
