@@ -1,6 +1,7 @@
 import { gatewayErrorResponse, GatewayHttpError, jsonError } from "./errors";
 import { fingerprintGatewayKey } from "./budget";
 import { createChatCompletion, createChatCompletionStream } from "./gateway";
+import { GatewayKeyRateLimiter, gatewayRateLimitKey, type GatewayRateLimitExceeded } from "./rate-limit";
 import type { GatewayConfig, GatewayFetch, GatewayRuntimeOptions, OpenAIChatCompletionRequest } from "./types";
 import { gatewayVersion } from "./version";
 
@@ -43,11 +44,31 @@ function corsHeaders(): HeadersInit {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "authorization,content-type",
+    "access-control-expose-headers": "retry-after",
   };
 }
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status, headers: corsHeaders() });
+}
+
+function rateLimitResponse(exceeded: GatewayRateLimitExceeded): Response {
+  return Response.json(
+    {
+      error: {
+        message: `Gateway ${exceeded.kind} rate limit exceeded. Retry after ${exceeded.retryAfterSeconds} seconds.`,
+        type: "gateway_rate_limit_error",
+        code: exceeded.kind === "requests" ? "gateway_request_rate_limit" : "gateway_token_rate_limit",
+      },
+    },
+    {
+      status: 429,
+      headers: {
+        ...corsHeaders(),
+        "retry-after": String(exceeded.retryAfterSeconds),
+      },
+    },
+  );
 }
 
 async function parseJsonBody(request: Request, maxBytes: number): Promise<unknown> {
@@ -161,6 +182,7 @@ function modelsResponse(config: GatewayConfig): Record<string, unknown> {
 
 export function createGatewayHandler(options: ServerOptions): (request: Request) => Promise<Response> {
   const env = options.env ?? process.env;
+  const keyRateLimiter = new GatewayKeyRateLimiter();
   const runtime: GatewayRuntimeOptions = {
     config: options.config,
     env,
@@ -188,11 +210,23 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
 
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         const body = validateChatRequest(await parseJsonBody(request, options.config.server.maxRequestBodyBytes));
+        const gatewayKeyFingerprint = fingerprintGatewayKey(bearerToken(request));
+        const rateLimitKey = gatewayRateLimitKey(gatewayKeyFingerprint);
+        const rateLimitConfig = options.config.server.rateLimits?.perGatewayKey;
+        const rateLimitCheck = keyRateLimiter.checkAndConsumeRequest(rateLimitKey, rateLimitConfig);
+        if (!rateLimitCheck.allowed) {
+          return rateLimitResponse(rateLimitCheck.exceeded);
+        }
+
         const runtimeWithRequestContext: GatewayRuntimeOptions = {
           ...runtime,
           budgetContext: {
-            gatewayKey: fingerprintGatewayKey(bearerToken(request)),
+            gatewayKey: gatewayKeyFingerprint,
             tenant: request.headers.get("x-gateway-tenant") ?? undefined,
+          },
+          rateLimit: {
+            onUsage: (usage) => keyRateLimiter.recordUsage(rateLimitKey, rateLimitConfig, usage),
+            requiresStreamingUsage: rateLimitConfig?.tokensPerMinute !== undefined,
           },
         };
         if (body.stream) {
