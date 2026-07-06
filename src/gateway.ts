@@ -14,6 +14,7 @@ import type {
   GatewayRouteCandidate,
   GatewayRouteDecision,
   GatewayRuntimeOptions,
+  GatewayUsage,
   OpenAIChatCompletionRequest,
 } from "./types";
 import { estimateCostUsd, normalizeUsage, toOpenAIUsage } from "./usage";
@@ -68,6 +69,90 @@ function requestWithStreamingUsage(request: OpenAIChatCompletionRequest): OpenAI
       include_usage: true,
     },
   };
+}
+
+function metricsModelId(options: GatewayRuntimeOptions, modelId: string | undefined, providerId?: string): string | undefined {
+  if (!modelId) return undefined;
+  if (options.config.models.some((model) => model.id === modelId)) return modelId;
+  if (providerId && options.config.providers.some((provider) => provider.id === providerId)) {
+    return `${providerId}/dynamic`;
+  }
+  return "dynamic";
+}
+
+function metricsDecision(options: GatewayRuntimeOptions, decision: GatewayRouteDecision): GatewayRouteDecision {
+  return {
+    ...decision,
+    selected: metricsModelId(options, decision.selected),
+    resolved_candidates: decision.resolved_candidates.map((modelId) => metricsModelId(options, modelId) ?? "dynamic"),
+    attempts: decision.attempts.map((attempt) => ({
+      ...attempt,
+      model: metricsModelId(options, attempt.model, attempt.provider) ?? "dynamic",
+    })),
+  };
+}
+
+function isRouteDecision(value: unknown): value is GatewayRouteDecision {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Partial<GatewayRouteDecision>;
+  return (
+    typeof record.requested_model === "string" &&
+    Array.isArray(record.resolved_candidates) &&
+    typeof record.mode === "string" &&
+    Array.isArray(record.attempts)
+  );
+}
+
+function gatewayErrorDetails(error: unknown): { errorType?: string; errorCode?: string } {
+  if (error instanceof GatewayHttpError) {
+    return { errorType: error.type, errorCode: error.code };
+  }
+  return {};
+}
+
+function recordSetupErrorMetrics(options: GatewayRuntimeOptions, stream: boolean, error: unknown): void {
+  const details = gatewayErrorDetails(error);
+  if (error instanceof GatewayHttpError && isRouteDecision(error.raw)) {
+    recordCompletionMetrics(options, {
+      stream,
+      status: "error",
+      decision: error.raw,
+      errorType: details.errorType,
+      errorCode: details.errorCode,
+    });
+    return;
+  }
+  options.metrics?.recordChatError({
+    stream,
+    errorType: details.errorType,
+    errorCode: details.errorCode,
+  });
+}
+
+function recordCompletionMetrics(
+  options: GatewayRuntimeOptions,
+  input: {
+    stream: boolean;
+    status: "success" | "error";
+    decision: GatewayRouteDecision;
+    candidate?: GatewayRouteCandidate;
+    usage?: GatewayUsage;
+    estimatedCostUsd?: number;
+    errorType?: string;
+    errorCode?: string;
+  },
+): void {
+  options.metrics?.recordChatCompletion({
+    stream: input.stream,
+    status: input.status,
+    decision: metricsDecision(options, input.decision),
+    provider: input.candidate?.provider.id,
+    model: metricsModelId(options, input.candidate?.model.id, input.candidate?.provider.id),
+    usage: input.usage,
+    estimatedCostUsd: input.estimatedCostUsd,
+    errorType: input.errorType,
+    errorCode: input.errorCode,
+  });
 }
 
 function extractProviderMessage(payload: unknown): string | undefined {
@@ -155,13 +240,22 @@ export async function createChatCompletion(
   request: OpenAIChatCompletionRequest,
 ): Promise<CompletionResult> {
   const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
-  await assertBudgetPreflight(options.config, requestBudgetContext);
-  const route = resolveRoute(options, request);
+  let route: ReturnType<typeof resolveRoute>;
+  try {
+    await assertBudgetPreflight(options.config, requestBudgetContext);
+    route = resolveRoute(options, request);
+  } catch (error) {
+    recordSetupErrorMetrics(options, false, error);
+    throw error;
+  }
   const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
   let lastError: GatewayHttpError | undefined;
 
   for (const candidate of route.candidates.slice(0, maxAttempts)) {
     const started = Date.now();
+    let metricsRecorded = false;
+    let observedUsage: GatewayUsage | undefined;
+    let observedEstimatedCostUsd: number | undefined;
     const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     try {
       await assertBudgetPreflight(options.config, budgetContext);
@@ -198,7 +292,9 @@ export async function createChatCompletion(
       const providerJson = await parseProviderJson(response);
       const rawUsage = providerJson.usage;
       const usage = normalizeUsage(rawUsage);
+      observedUsage = usage;
       const estimatedCostUsd = estimateCostUsd(usage, candidate.model);
+      observedEstimatedCostUsd = estimatedCostUsd;
       const budgets = await evaluateBudgetPostflight(
         options.config,
         budgetContext,
@@ -229,7 +325,32 @@ export async function createChatCompletion(
         status: "success",
       });
 
-      assertBudgetPostflight(budgets);
+      try {
+        assertBudgetPostflight(budgets);
+      } catch (error) {
+        const details = gatewayErrorDetails(error);
+        recordCompletionMetrics(options, {
+          stream: false,
+          status: "error",
+          decision: route.decision,
+          candidate,
+          usage,
+          estimatedCostUsd,
+          errorType: details.errorType,
+          errorCode: details.errorCode,
+        });
+        metricsRecorded = true;
+        throw error;
+      }
+      recordCompletionMetrics(options, {
+        stream: false,
+        status: "success",
+        decision: route.decision,
+        candidate,
+        usage,
+        estimatedCostUsd,
+      });
+      metricsRecorded = true;
       return { body, status: 200, decision: route.decision };
     } catch (error) {
       const gatewayError =
@@ -260,10 +381,29 @@ export async function createChatCompletion(
       }
 
       if (gatewayError.retryable) continue;
+      if (!metricsRecorded) {
+        recordCompletionMetrics(options, {
+          stream: false,
+          status: "error",
+          decision: route.decision,
+          candidate,
+          usage: observedUsage,
+          estimatedCostUsd: observedEstimatedCostUsd,
+          errorType: gatewayError.type,
+          errorCode: gatewayError.code,
+        });
+      }
       throw gatewayError;
     }
   }
 
+  recordCompletionMetrics(options, {
+    stream: false,
+    status: "error",
+    decision: route.decision,
+    errorType: lastError?.type,
+    errorCode: lastError?.code,
+  });
   throw new GatewayHttpError({
     status: lastError?.status ?? 502,
     type: lastError?.type ?? "gateway_routing_error",
@@ -279,8 +419,14 @@ export async function createChatCompletionStream(
   request: OpenAIChatCompletionRequest,
 ): Promise<Response> {
   const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
-  await assertBudgetPreflight(options.config, requestBudgetContext);
-  const route = resolveRoute(options, request);
+  let route: ReturnType<typeof resolveRoute>;
+  try {
+    await assertBudgetPreflight(options.config, requestBudgetContext);
+    route = resolveRoute(options, request);
+  } catch (error) {
+    recordSetupErrorMetrics(options, true, error);
+    throw error;
+  }
   const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
   let lastError: GatewayHttpError | undefined;
 
@@ -318,6 +464,14 @@ export async function createChatCompletionStream(
         latencyMs: Date.now() - started,
       });
       if (lastError.retryable) continue;
+      recordCompletionMetrics(options, {
+        stream: true,
+        status: "error",
+        decision: route.decision,
+        candidate,
+        errorType: lastError.type,
+        errorCode: lastError.code,
+      });
       throw lastError;
     }
     const latencyMs = Date.now() - started;
@@ -337,6 +491,14 @@ export async function createChatCompletionStream(
       });
       lastError = error;
       if (error.retryable) continue;
+      recordCompletionMetrics(options, {
+        stream: true,
+        status: "error",
+        decision: route.decision,
+        candidate,
+        errorType: error.type,
+        errorCode: error.code,
+      });
       throw error;
     }
 
@@ -377,7 +539,34 @@ export async function createChatCompletionStream(
         errorCode,
       });
       streamBudgetAccounted = true;
-      if (status === "success") assertBudgetPostflight(budgets);
+      if (status === "success") {
+        try {
+          assertBudgetPostflight(budgets);
+        } catch (error) {
+          const details = gatewayErrorDetails(error);
+          recordCompletionMetrics(options, {
+            stream: true,
+            status: "error",
+            decision: route.decision,
+            candidate,
+            usage,
+            estimatedCostUsd,
+            errorType: details.errorType,
+            errorCode: details.errorCode,
+          });
+          throw error;
+        }
+      }
+      recordCompletionMetrics(options, {
+        stream: true,
+        status,
+        decision: route.decision,
+        candidate,
+        usage,
+        estimatedCostUsd,
+        errorType,
+        errorCode,
+      });
     };
 
     return transformOpenAICompatibleStream(response, {
@@ -404,6 +593,13 @@ export async function createChatCompletionStream(
     });
   }
 
+  recordCompletionMetrics(options, {
+    stream: true,
+    status: "error",
+    decision: route.decision,
+    errorType: lastError?.type,
+    errorCode: lastError?.code,
+  });
   throw new GatewayHttpError({
     status: lastError?.status ?? 502,
     type: lastError?.type ?? "gateway_routing_error",

@@ -13,6 +13,7 @@ The open-source package is useful on its own. Anyone can run it locally or on th
 - Explicit China/provider policy so requests are never silently routed to a region or provider class the caller did not allow.
 - Usage normalization, estimated cost hooks, route decision metadata, and optional local JSONL usage ledger.
 - Hard or soft budgets by gateway key, tenant, and model alias across USD plus input/output/total tokens.
+- Optional OpenMetrics `/metrics` scrape for request, usage, route, cost, and budget state counters.
 - Local-first defaults: no hosted Hasna calls unless explicitly configured.
 
 ## Quick Start
@@ -72,6 +73,8 @@ Required config examples:
 Provider keys are loaded from environment variables only. Do not put provider secrets in config files.
 
 Budgets live in the same JSON config and spend is calculated from the local usage ledger. Daily, monthly, and lifetime budgets require `storage.usageLedgerPath`; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
+
+Set `server.metricsEnabled` to `true` to expose `GET /metrics` in OpenMetrics format. It is disabled by default. Metric labels are limited to bounded operational dimensions such as method, endpoint, status, provider, model, route mode, and budget id fingerprint/window/mode; credential values, prompts, response text, request bodies, raw paths, and dynamic request model names are not emitted.
 
 ## Documentation
 

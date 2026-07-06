@@ -1,6 +1,7 @@
 import { gatewayErrorResponse, GatewayHttpError, jsonError } from "./errors";
 import { fingerprintGatewayKey } from "./budget";
 import { createChatCompletion, createChatCompletionStream } from "./gateway";
+import { GatewayMetricsCollector, normalizeMetricsEndpoint } from "./metrics";
 import type { GatewayConfig, GatewayFetch, GatewayRuntimeOptions, OpenAIChatCompletionRequest } from "./types";
 import { gatewayVersion } from "./version";
 
@@ -48,6 +49,16 @@ function corsHeaders(): HeadersInit {
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status, headers: corsHeaders() });
+}
+
+function openMetrics(text: string): Response {
+  return new Response(text, {
+    status: 200,
+    headers: {
+      ...corsHeaders(),
+      "content-type": "application/openmetrics-text; version=1.0.0; charset=utf-8",
+    },
+  });
 }
 
 async function parseJsonBody(request: Request, maxBytes: number): Promise<unknown> {
@@ -161,21 +172,37 @@ function modelsResponse(config: GatewayConfig): Record<string, unknown> {
 
 export function createGatewayHandler(options: ServerOptions): (request: Request) => Promise<Response> {
   const env = options.env ?? process.env;
+  const metrics = options.config.server.metricsEnabled ? new GatewayMetricsCollector() : undefined;
   const runtime: GatewayRuntimeOptions = {
     config: options.config,
     env,
     fetchImpl: options.fetchImpl,
+    metrics,
   };
 
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
+    const metricsEndpoint = normalizeMetricsEndpoint(url.pathname);
+    const recordRequest = (response: Response): Response => {
+      metrics?.recordHttpRequest({
+        method: request.method,
+        endpoint: metricsEndpoint,
+        status: response.status,
+      });
+      return response;
+    };
+
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
+      return recordRequest(new Response(null, { status: 204, headers: corsHeaders() }));
     }
 
     try {
       if (request.method === "GET" && url.pathname === "/health") {
-        return json({ status: "ok", version: gatewayVersion });
+        return recordRequest(json({ status: "ok", version: gatewayVersion }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/metrics" && metrics) {
+        return recordRequest(openMetrics(await metrics.renderOpenMetrics(options.config)));
       }
 
       if (url.pathname.startsWith("/v1/")) {
@@ -183,7 +210,7 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
       }
 
       if (request.method === "GET" && url.pathname === "/v1/models") {
-        return json(modelsResponse(options.config));
+        return recordRequest(json(modelsResponse(options.config)));
       }
 
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
@@ -196,16 +223,16 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
           },
         };
         if (body.stream) {
-          return await createChatCompletionStream(runtimeWithRequestContext, body);
+          return recordRequest(await createChatCompletionStream(runtimeWithRequestContext, body));
         }
 
         const result = await createChatCompletion(runtimeWithRequestContext, body);
-        return json(result.body, result.status);
+        return recordRequest(json(result.body, result.status));
       }
 
-      return jsonError(404, "Endpoint not found.", "gateway_routing_error", "not_found");
+      return recordRequest(jsonError(404, "Endpoint not found.", "gateway_routing_error", "not_found"));
     } catch (error) {
-      return gatewayErrorResponse(error);
+      return recordRequest(gatewayErrorResponse(error));
     }
   };
 }

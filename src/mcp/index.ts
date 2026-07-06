@@ -245,6 +245,7 @@ function safeConfigSummary(config: GatewayConfig): Record<string, unknown> {
       maxRequestBodyBytes: config.server.maxRequestBodyBytes,
       includeGatewayMetadata: config.server.includeGatewayMetadata,
       maxFallbackAttempts: config.server.maxFallbackAttempts,
+      metricsEnabled: config.server.metricsEnabled,
     },
     auth: {
       apiKeyEnv: safeString(config.auth.apiKeyEnv),

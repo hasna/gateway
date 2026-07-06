@@ -5,7 +5,8 @@
     "requestTimeoutMs": 60000,
     "maxRequestBodyBytes": 1000000,
     "includeGatewayMetadata": true,
-    "maxFallbackAttempts": 2
+    "maxFallbackAttempts": 2,
+    "metricsEnabled": false
   },
   "auth": {
     "apiKeyEnv": "GATEWAY_API_KEY",
