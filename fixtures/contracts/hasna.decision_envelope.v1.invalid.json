@@ -1,0 +1,8 @@
+{
+  "schema": "hasna.decision_envelope.v1",
+  "id": "gateway_decision_invalid_fixture",
+  "createdAt": "2026-07-06T00:00:00.000Z",
+  "decisionType": "model_route",
+  "status": "selected",
+  "reason": "Selected decisions require at least one selected resource."
+}

@@ -6,6 +6,7 @@
       "name": "@hasna/gateway",
       "dependencies": {
         "@hasna/cloud": "0.1.41",
+        "@hasna/contracts": "^0.2.2",
         "@modelcontextprotocol/sdk": "^1.12.1",
         "zod": "^3.25.76",
       },
@@ -17,6 +18,8 @@
   },
   "packages": {
     "@hasna/cloud": ["@hasna/cloud@0.1.41", "", { "dependencies": { "@hasna/events": "^0.1.6", "@modelcontextprotocol/sdk": "^1.12.1", "commander": "^13.1.0", "pg": "^8.13.3", "zod": "^3.24.2" }, "bin": { "cloud": "dist/cli/index.js", "cloud-mcp": "dist/mcp/bin.js" } }, "sha512-KTMmSshAlPjIKiXb+VTq+tdnSGiCdX6xaaDfxwjORtdLtvM9Zui5OyCto5o3PbPm6Eu4BvTOndn1TbTeEMQftw=="],
+
+    "@hasna/contracts": ["@hasna/contracts@0.2.2", "", { "dependencies": { "commander": "^13.1.0", "zod": "^3.25.76" }, "bin": { "contracts": "dist/cli/index.js", "contracts-cli": "dist/cli/index.js" } }, "sha512-xpOkF8NIH1+P6kSkb7LiOMfb+yLR2iVvtP1SR93G4f6puGx6YSSj/JgpzaAN4lG0WbpftG5w7xqTsk3Dl/27Rw=="],
 
     "@hasna/events": ["@hasna/events@0.1.13", "", { "dependencies": { "commander": "^13.1.0" }, "bin": { "events": "dist/cli/index.js", "hasna-events": "dist/cli/index.js" } }, "sha512-DzmEiDrBoibxzCBeZPEmdpWsNh+5SXTSnilqCeHxi0Do3a9mQJ43ZSxq/Ipzw/xNa2rShAx48KzduCZrGDHi9g=="],
 

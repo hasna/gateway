@@ -1,0 +1,19 @@
+{
+  "schema": "hasna.capability_card.v1",
+  "id": "gateway_capability_fixture",
+  "createdAt": "2026-07-06T00:00:00.000Z",
+  "kind": "model",
+  "name": "placeholder-provider/placeholder-model",
+  "version": "placeholder-model",
+  "status": "available",
+  "capabilities": ["chat", "streaming", "provider:openai-compatible", "route:fallback"],
+  "limitations": ["requires env PLACEHOLDER_API_KEY", "regions: us"],
+  "riskLevel": "low",
+  "metadata": {
+    "sourcePackage": "@hasna/gateway",
+    "provider": {
+      "id": "placeholder-provider",
+      "kind": "openai-compatible"
+    }
+  }
+}

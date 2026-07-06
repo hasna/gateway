@@ -1,0 +1,8 @@
+{
+  "schema": "hasna.capability_card.v1",
+  "id": "gateway_capability_invalid_fixture",
+  "createdAt": "2026-07-06T00:00:00.000Z",
+  "kind": "route",
+  "name": "placeholder-provider/placeholder-model",
+  "status": "available"
+}

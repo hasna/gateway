@@ -37,6 +37,7 @@
     "build": "rm -rf dist && bun build src/index.ts src/cli/index.ts src/mcp/index.ts --outdir dist --target bun && tsc -p tsconfig.build.json && chmod +x dist/cli/index.js dist/mcp/index.js",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "contracts:validate": "contracts conformance fixtures/contracts",
     "dev": "bun run src/cli/index.ts serve --config gateway.config.example.json",
     "prepublishOnly": "bun run typecheck && bun run test && bun run build"
   },
@@ -70,6 +71,7 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@hasna/cloud": "0.1.41",
+    "@hasna/contracts": "^0.2.2",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "zod": "^3.25.76"
   },

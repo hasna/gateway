@@ -8,6 +8,7 @@ export {
 export { GatewayHttpError, gatewayErrorResponse, jsonError } from "./errors";
 export { createChatCompletion, createChatCompletionStream } from "./gateway";
 export { appendUsageLedger } from "./ledger";
+export { toCapabilityCard, toCapabilityCards, toCostEstimate, toDecisionEnvelope } from "./lib/contracts";
 export { modelPresets, providerPresets } from "./presets";
 export { resolveRoute } from "./router";
 export { createGatewayHandler, startGatewayServer } from "./server";
@@ -24,6 +25,7 @@ export {
   spendFromUsage,
 } from "./budget";
 export type { GatewayBudgetContext, GatewayBudgetSpend, GatewayBudgetStatus } from "./budget";
+export type { ContractAdapterOptions, GatewayBudgetDenial } from "./lib/contracts";
 export { gatewayVersion } from "./version";
 export type {
   ChatMessage,
