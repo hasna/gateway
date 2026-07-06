@@ -10,6 +10,78 @@ describe("HTTP server handler", () => {
     expect(await response.json()).toMatchObject({ status: "ok" });
   });
 
+  test("serves version without auth", async () => {
+    const handler = createGatewayHandler({ config: testConfig(), env: {} });
+    const response = await handler(new Request("http://localhost/version"));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.name).toBe("@hasna/gateway");
+    expect(body.version).toBeString();
+  });
+
+  test("serves authenticated readiness and fails closed without provider secrets", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway" },
+    });
+    const response = await handler(
+      new Request("http://localhost/ready", {
+        headers: { authorization: "Bearer gateway" },
+      }),
+    );
+    const body = await response.json();
+    expect(response.status).toBe(503);
+    expect(body.ready).toBe(false);
+    expect(JSON.stringify(body)).not.toContain("OPENAI_API_KEY");
+    expect(JSON.stringify(body)).not.toContain("openai");
+    expect(body.errors.some((error: { message: string }) => error.message.includes("provider"))).toBe(true);
+  });
+
+  test("serves authenticated readiness when runtime secrets are present", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/ready", {
+        headers: { authorization: "Bearer gateway" },
+      }),
+    );
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.ready).toBe(true);
+    expect(body.checks.some((check: { id: string; status: string }) => check.id === "gateway-auth" && check.status === "passed")).toBe(true);
+  });
+
+  test("denies readiness without gateway auth", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(new Request("http://localhost/ready"));
+    expect(response.status).toBe(401);
+  });
+
+  test("allowlists browser CORS origins", async () => {
+    const config = testConfig();
+    config.server.corsAllowedOrigins = ["https://app.example.test"];
+    const handler = createGatewayHandler({ config, env: {} });
+    const allowed = await handler(
+      new Request("http://localhost/health", {
+        headers: { origin: "https://app.example.test" },
+      }),
+    );
+    const denied = await handler(
+      new Request("http://localhost/health", {
+        headers: { origin: "https://evil.example.test" },
+      }),
+    );
+    expect(allowed.status).toBe(200);
+    expect(allowed.headers.get("access-control-allow-origin")).toBe("https://app.example.test");
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).error.code).toBe("cors_origin_denied");
+  });
+
   test("rejects missing gateway auth on v1 routes", async () => {
     const handler = createGatewayHandler({
       config: testConfig(),
@@ -106,8 +178,7 @@ describe("HTTP server handler", () => {
     expect(allowed.status).toBe(200);
     expect(rejected.status).toBe(429);
     expect(Number(rejected.headers.get("retry-after"))).toBeGreaterThan(0);
-    expect(rejected.headers.get("access-control-allow-origin")).toBe("*");
-    expect(rejected.headers.get("access-control-expose-headers")).toContain("retry-after");
+    expect(rejected.headers.get("access-control-allow-origin")).toBeNull();
     expect(body.error.type).toBe("gateway_rate_limit_error");
     expect(body.error.code).toBe("gateway_request_rate_limit");
     expect(providerCalls).toBe(1);

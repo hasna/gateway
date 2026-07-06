@@ -1,3 +1,4 @@
+import { validateRuntimeSecrets } from "./config";
 import { gatewayErrorResponse, GatewayHttpError, jsonError } from "./errors";
 import { fingerprintGatewayKey } from "./budget";
 import { createChatCompletion, createChatCompletionStream } from "./gateway";
@@ -39,20 +40,24 @@ function validateGatewayAuth(request: Request, config: GatewayConfig, env: Recor
   }
 }
 
-function corsHeaders(): HeadersInit {
+function corsHeaders(request: Request, config: GatewayConfig): HeadersInit {
+  const origin = request.headers.get("origin");
+  if (origin && !config.server.corsAllowedOrigins.includes(origin)) {
+    return {};
+  }
   return {
-    "access-control-allow-origin": "*",
+    ...(origin ? { "access-control-allow-origin": origin, vary: "origin" } : {}),
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "authorization,content-type",
     "access-control-expose-headers": "retry-after",
   };
 }
 
-function json(data: unknown, status = 200): Response {
-  return Response.json(data, { status, headers: corsHeaders() });
+function json(request: Request, config: GatewayConfig, data: unknown, status = 200): Response {
+  return Response.json(data, { status, headers: corsHeaders(request, config) });
 }
 
-function rateLimitResponse(exceeded: GatewayRateLimitExceeded): Response {
+function rateLimitResponse(request: Request, config: GatewayConfig, exceeded: GatewayRateLimitExceeded): Response {
   return Response.json(
     {
       error: {
@@ -64,7 +69,7 @@ function rateLimitResponse(exceeded: GatewayRateLimitExceeded): Response {
     {
       status: 429,
       headers: {
-        ...corsHeaders(),
+        ...corsHeaders(request, config),
         "retry-after": String(exceeded.retryAfterSeconds),
       },
     },
@@ -180,6 +185,35 @@ function modelsResponse(config: GatewayConfig): Record<string, unknown> {
   };
 }
 
+function readinessResponse(config: GatewayConfig, env: Record<string, string | undefined>): Record<string, unknown> {
+  const runtimeErrors = validateRuntimeSecrets(config, env);
+  const checks = [
+    {
+      id: "gateway-auth",
+      status: config.auth.required && !env[config.auth.apiKeyEnv] ? "failed" : "passed",
+      summary: config.auth.required ? `Gateway auth uses env var ${config.auth.apiKeyEnv}.` : "Gateway auth is disabled by config.",
+    },
+    {
+      id: "provider-secrets",
+      status: runtimeErrors.some((error) => error.startsWith("At least one enabled provider")) ? "failed" : "passed",
+      summary: "At least one enabled provider has an environment-backed API key.",
+    },
+    {
+      id: "usage-ledger",
+      status: config.storage.usageLedgerPath || config.storage.cloud ? "passed" : "deferred",
+      summary: config.storage.usageLedgerPath || config.storage.cloud
+        ? "Usage ledger backend is configured."
+        : "No cumulative usage ledger configured; per-request budgets can still run.",
+    },
+  ];
+  return {
+    ready: runtimeErrors.length === 0,
+    version: gatewayVersion,
+    checks,
+    errors: runtimeErrors.map((error) => ({ code: "runtime_config", message: error })),
+  };
+}
+
 export function createGatewayHandler(options: ServerOptions): (request: Request) => Promise<Response> {
   const env = options.env ?? process.env;
   const keyRateLimiter = new GatewayKeyRateLimiter();
@@ -191,13 +225,37 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
 
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
+    const origin = request.headers.get("origin");
+    const corsAllowed = !origin || options.config.server.corsAllowedOrigins.includes(origin);
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
+      if (!corsAllowed) {
+        return Response.json(
+          { error: { message: "CORS origin is not allowed.", type: "gateway_cors_error", code: "cors_origin_denied" } },
+          { status: 403 },
+        );
+      }
+      return new Response(null, { status: 204, headers: corsHeaders(request, options.config) });
+    }
+    if (!corsAllowed) {
+      return Response.json(
+        { error: { message: "CORS origin is not allowed.", type: "gateway_cors_error", code: "cors_origin_denied" } },
+        { status: 403 },
+      );
     }
 
     try {
       if (request.method === "GET" && url.pathname === "/health") {
-        return json({ status: "ok", version: gatewayVersion });
+        return json(request, options.config, { status: "ok", version: gatewayVersion });
+      }
+
+      if (request.method === "GET" && url.pathname === "/version") {
+        return json(request, options.config, { name: "@hasna/gateway", version: gatewayVersion });
+      }
+
+      if (request.method === "GET" && url.pathname === "/ready") {
+        validateGatewayAuth(request, options.config, env);
+        const body = readinessResponse(options.config, env);
+        return json(request, options.config, body, body.ready ? 200 : 503);
       }
 
       if (url.pathname.startsWith("/v1/")) {
@@ -205,7 +263,7 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
       }
 
       if (request.method === "GET" && url.pathname === "/v1/models") {
-        return json(modelsResponse(options.config));
+        return json(request, options.config, modelsResponse(options.config));
       }
 
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
@@ -215,7 +273,7 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
         const rateLimitConfig = options.config.server.rateLimits?.perGatewayKey;
         const rateLimitCheck = keyRateLimiter.checkAndConsumeRequest(rateLimitKey, rateLimitConfig);
         if (!rateLimitCheck.allowed) {
-          return rateLimitResponse(rateLimitCheck.exceeded);
+          return rateLimitResponse(request, options.config, rateLimitCheck.exceeded);
         }
 
         const runtimeWithRequestContext: GatewayRuntimeOptions = {
@@ -234,7 +292,7 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
         }
 
         const result = await createChatCompletion(runtimeWithRequestContext, body);
-        return json(result.body, result.status);
+        return json(request, options.config, result.body, result.status);
       }
 
       return jsonError(404, "Endpoint not found.", "gateway_routing_error", "not_found");

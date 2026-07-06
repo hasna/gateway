@@ -91,6 +91,7 @@ export type GatewayServerConfig = {
   maxRequestBodyBytes: number;
   includeGatewayMetadata: boolean;
   maxFallbackAttempts: number;
+  corsAllowedOrigins: string[];
   rateLimits?: GatewayRateLimitConfig;
 };
 
