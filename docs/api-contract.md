@@ -52,6 +52,10 @@ Returns configured gateway models and aliases, including provider and capability
 }
 ```
 
+## `GET /metrics`
+
+Disabled by default. When `server.metricsEnabled` is `true`, returns OpenMetrics text with gateway-prefixed request, token, estimated cost, route decision, route attempt, and budget state metrics. Labels are bounded to operational dimensions such as method, normalized endpoint, status, provider, model, route mode, and budget id fingerprint/window/mode. The endpoint must not emit credential values, prompts, response text, request bodies, raw paths, dynamic request model names, or arbitrary request metadata.
+
 ## `POST /v1/chat/completions`
 
 The initial critical endpoint. It should support:

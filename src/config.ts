@@ -40,6 +40,7 @@ const serverSchema = z
     maxRequestBodyBytes: z.number().min(1).optional(),
     includeGatewayMetadata: z.boolean().optional(),
     maxFallbackAttempts: z.number().int().min(1).optional(),
+    metricsEnabled: z.boolean().optional(),
   })
   .passthrough();
 
@@ -146,6 +147,7 @@ const defaultServer: GatewayServerConfig = {
   maxRequestBodyBytes: 1_000_000,
   includeGatewayMetadata: true,
   maxFallbackAttempts: 3,
+  metricsEnabled: false,
 };
 
 const defaultAuth: GatewayAuthConfig = {

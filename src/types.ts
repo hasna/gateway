@@ -82,6 +82,7 @@ export type GatewayServerConfig = {
   maxRequestBodyBytes: number;
   includeGatewayMetadata: boolean;
   maxFallbackAttempts: number;
+  metricsEnabled: boolean;
 };
 
 export type GatewayAuthConfig = {
@@ -210,6 +211,32 @@ export type GatewayUsage = {
   raw?: unknown;
 };
 
+export type GatewayMetricsCompletionStatus = "success" | "error";
+
+export type GatewayMetricsRecorder = {
+  recordHttpRequest(input: {
+    method: string;
+    endpoint: string;
+    status: number;
+  }): void;
+  recordChatError(input: {
+    stream: boolean;
+    errorType?: string;
+    errorCode?: string;
+  }): void;
+  recordChatCompletion(input: {
+    stream: boolean;
+    status: GatewayMetricsCompletionStatus;
+    decision: GatewayRouteDecision;
+    provider?: string;
+    model?: string;
+    usage?: GatewayUsage;
+    estimatedCostUsd?: number;
+    errorType?: string;
+    errorCode?: string;
+  }): void;
+};
+
 export type OpenAIUsage = {
   prompt_tokens: number;
   completion_tokens: number;
@@ -303,6 +330,7 @@ export type GatewayRuntimeOptions = {
   config: GatewayConfig;
   env?: Record<string, string | undefined>;
   fetchImpl?: GatewayFetch;
+  metrics?: GatewayMetricsRecorder;
   budgetContext?: {
     gatewayKey?: string;
     tenant?: string;

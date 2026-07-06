@@ -34,6 +34,8 @@ export type {
   GatewayConfigValidationResult,
   GatewayDataPolicy,
   GatewayGlobalPolicy,
+  GatewayMetricsCompletionStatus,
+  GatewayMetricsRecorder,
   GatewayModelCapability,
   GatewayModelConfig,
   GatewayProviderConfig,

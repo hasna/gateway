@@ -10,6 +10,7 @@ export function testConfig(): GatewayConfig {
       maxRequestBodyBytes: 100000,
       includeGatewayMetadata: true,
       maxFallbackAttempts: 3,
+      metricsEnabled: false,
     },
     auth: {
       apiKeyEnv: "GATEWAY_API_KEY",
