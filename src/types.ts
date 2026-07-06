@@ -75,6 +75,15 @@ export type GatewayRoutePolicy = {
   dataPolicy?: GatewayDataPolicy;
 };
 
+export type GatewayKeyRateLimitConfig = {
+  requestsPerMinute?: number;
+  tokensPerMinute?: number;
+};
+
+export type GatewayRateLimitConfig = {
+  perGatewayKey?: GatewayKeyRateLimitConfig;
+};
+
 export type GatewayServerConfig = {
   host: string;
   port: number;
@@ -82,6 +91,7 @@ export type GatewayServerConfig = {
   maxRequestBodyBytes: number;
   includeGatewayMetadata: boolean;
   maxFallbackAttempts: number;
+  rateLimits?: GatewayRateLimitConfig;
 };
 
 export type GatewayAuthConfig = {
@@ -94,8 +104,20 @@ export type GatewayGlobalPolicy = GatewayDataPolicy & {
   allowRequestPolicyExpansion?: boolean;
 };
 
+export type GatewayCloudStorageConfig =
+  | {
+      backend: "sqlite";
+      sqlitePath: string;
+    }
+  | {
+      backend: "postgres";
+      connectionString?: string;
+      connectionStringEnv?: string;
+    };
+
 export type GatewayStorageConfig = {
   usageLedgerPath?: string;
+  cloud?: GatewayCloudStorageConfig;
 };
 
 export type GatewayBudgetWindow = "per-request" | "daily" | "monthly" | "lifetime";
@@ -306,5 +328,9 @@ export type GatewayRuntimeOptions = {
   budgetContext?: {
     gatewayKey?: string;
     tenant?: string;
+  };
+  rateLimit?: {
+    onUsage?: (usage: GatewayUsage) => Promise<void> | void;
+    requiresStreamingUsage?: boolean;
   };
 };

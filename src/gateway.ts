@@ -150,12 +150,23 @@ async function providerErrorFromResponse(candidate: GatewayRouteCandidate, respo
   return providerErrorToGateway(mapped);
 }
 
+async function appendUsageLedgerBestEffort(input: Parameters<typeof appendUsageLedger>[0]): Promise<void> {
+  try {
+    await appendUsageLedger(input);
+  } catch (error) {
+    if ((input.budgets?.length ?? 0) > 0) throw error;
+    // Usage ledger persistence is observability/accounting for already-consumed provider work.
+    // Budget checks remain fail-closed before and after this best-effort write.
+  }
+}
+
 export async function createChatCompletion(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
 ): Promise<CompletionResult> {
+  const env = options.env ?? process.env;
   const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
-  await assertBudgetPreflight(options.config, requestBudgetContext);
+  await assertBudgetPreflight(options.config, requestBudgetContext, { env });
   const route = resolveRoute(options, request);
   const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
   let lastError: GatewayHttpError | undefined;
@@ -164,7 +175,7 @@ export async function createChatCompletion(
     const started = Date.now();
     const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     try {
-      await assertBudgetPreflight(options.config, budgetContext);
+      await assertBudgetPreflight(options.config, budgetContext, { env });
       const response = await callProvider(options, request, candidate);
       const latencyMs = Date.now() - started;
 
@@ -197,12 +208,23 @@ export async function createChatCompletion(
 
       const providerJson = await parseProviderJson(response);
       const rawUsage = providerJson.usage;
+      if (rawUsage === undefined && options.rateLimit?.requiresStreamingUsage === true) {
+        throw new GatewayHttpError({
+          status: 429,
+          type: "gateway_rate_limit_error",
+          code: "gateway_token_usage_missing",
+          message: "Provider response did not include usage required to enforce a token rate limit.",
+          raw: { context: budgetContext },
+        });
+      }
       const usage = normalizeUsage(rawUsage);
+      await options.rateLimit?.onUsage?.(usage);
       const estimatedCostUsd = estimateCostUsd(usage, candidate.model);
       const budgets = await evaluateBudgetPostflight(
         options.config,
         budgetContext,
         spendFromUsage(usage, estimatedCostUsd),
+        { env },
       );
       const body: Record<string, unknown> = {
         ...providerJson,
@@ -217,7 +239,7 @@ export async function createChatCompletion(
         body.gateway = metadataFor(candidate, route.decision, estimatedCostUsd, budgets);
       }
 
-      await appendUsageLedger({
+      await appendUsageLedgerBestEffort({
         config: options.config,
         provider: candidate.provider,
         model: candidate.model,
@@ -227,6 +249,7 @@ export async function createChatCompletion(
         estimatedCostUsd,
         budgets,
         status: "success",
+        env,
       });
 
       assertBudgetPostflight(budgets);
@@ -278,8 +301,9 @@ export async function createChatCompletionStream(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
 ): Promise<Response> {
+  const env = options.env ?? process.env;
   const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
-  await assertBudgetPreflight(options.config, requestBudgetContext);
+  await assertBudgetPreflight(options.config, requestBudgetContext, { env });
   const route = resolveRoute(options, request);
   const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
   let lastError: GatewayHttpError | undefined;
@@ -289,9 +313,12 @@ export async function createChatCompletionStream(
     let response: Response;
     const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
     let hardBudgetRequiresUsage = false;
+    const rateLimitRequiresUsage = options.rateLimit?.requiresStreamingUsage === true;
     try {
-      const budgetStatuses = await assertBudgetPreflight(options.config, budgetContext);
-      const budgetedRequest = budgetStatuses.length > 0 ? requestWithStreamingUsage(request) : request;
+      const budgetStatuses = await assertBudgetPreflight(options.config, budgetContext, { env });
+      const budgetedRequest = budgetStatuses.length > 0 || rateLimitRequiresUsage
+        ? requestWithStreamingUsage(request)
+        : request;
       hardBudgetRequiresUsage = budgetStatuses.some((status) => status.budget.mode === "hard");
       response = await openProviderStream(options, budgetedRequest, candidate);
     } catch (error) {
@@ -357,13 +384,15 @@ export async function createChatCompletionStream(
       errorCode?: string,
     ) => {
       const usage = rawUsage === undefined ? undefined : normalizeUsage(rawUsage);
+      if (usage) await options.rateLimit?.onUsage?.(usage);
       const estimatedCostUsd = usage ? estimateCostUsd(usage, candidate.model) : undefined;
       const budgets = await evaluateBudgetPostflight(
         options.config,
         budgetContext,
         spendFromUsage(usage, estimatedCostUsd),
+        { env },
       );
-      await appendUsageLedger({
+      await appendUsageLedgerBestEffort({
         config: options.config,
         provider: candidate.provider,
         model: candidate.model,
@@ -375,6 +404,7 @@ export async function createChatCompletionStream(
         status,
         errorType,
         errorCode,
+        env,
       });
       streamBudgetAccounted = true;
       if (status === "success") assertBudgetPostflight(budgets);
@@ -390,14 +420,25 @@ export async function createChatCompletionStream(
       },
       onComplete: async (result) => {
         if (streamBudgetAccounted) return;
-        if (result.status === "success" && result.rawUsage === undefined && hardBudgetRequiresUsage) {
-          throw new GatewayHttpError({
-            status: 402,
-            type: "gateway_budget_error",
-            code: "budget_usage_missing",
-            message: "Provider stream did not include usage required to enforce a hard budget.",
-            raw: { context: budgetContext },
-          });
+        if (result.status === "success" && result.rawUsage === undefined) {
+          if (hardBudgetRequiresUsage) {
+            throw new GatewayHttpError({
+              status: 402,
+              type: "gateway_budget_error",
+              code: "budget_usage_missing",
+              message: "Provider stream did not include usage required to enforce a hard budget.",
+              raw: { context: budgetContext },
+            });
+          }
+          if (rateLimitRequiresUsage) {
+            throw new GatewayHttpError({
+              status: 429,
+              type: "gateway_rate_limit_error",
+              code: "gateway_token_usage_missing",
+              message: "Provider stream did not include usage required to enforce a token rate limit.",
+              raw: { context: budgetContext },
+            });
+          }
         }
         await accountStreamingUsage(result.rawUsage, result.status, result.errorType, result.errorCode);
       },

@@ -11,6 +11,7 @@ import {
 } from "../config";
 import { GatewayHttpError, redactSensitiveText } from "../errors";
 import { getBudgetStatuses } from "../budget";
+import { readUsageLedgerRecords, usageLedgerBackendMode } from "../storage";
 import type { GatewayBudgetStatus } from "../budget";
 import { modelPresets, providerPresets } from "../presets";
 import { resolveRoute } from "../router";
@@ -253,6 +254,19 @@ function safeConfigSummary(config: GatewayConfig): Record<string, unknown> {
     },
     storage: {
       usageLedgerPath: safeString(config.storage.usageLedgerPath),
+      ...(config.storage.cloud
+        ? {
+            cloud: {
+              backend: config.storage.cloud.backend,
+              ...(config.storage.cloud.backend === "sqlite"
+                ? { sqlitePath: safeString(config.storage.cloud.sqlitePath) }
+                : {
+                    connectionStringConfigured: Boolean(config.storage.cloud.connectionString),
+                    connectionStringEnv: safeString(config.storage.cloud.connectionStringEnv),
+                  }),
+            },
+          }
+        : {}),
     },
     policy: safeDataPolicy(config.policy),
     providers: config.providers.map((provider) => ({
@@ -345,40 +359,31 @@ function explainRoute(
 }
 
 async function summarizeUsageLedger(config: GatewayConfig, limit: number): Promise<Record<string, unknown>> {
-  const path = config.storage.usageLedgerPath;
-  if (!path) {
+  const backend = usageLedgerBackendMode(config);
+  if (backend === "none") {
     return {
       configured: false,
+      backend,
       records: 0,
       totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
       recent: [],
     };
   }
 
-  let text = "";
+  let records: LedgerRecord[] = [];
   try {
-    text = await readFile(path, "utf8");
-  } catch {
+    records = await readUsageLedgerRecords(config);
+  } catch (error) {
     return {
       configured: true,
-      path: safeString(path),
+      backend,
+      path: safeString(config.storage.usageLedgerPath),
+      error: redactMcpString(error instanceof Error ? error.message : String(error)),
       records: 0,
       totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
       recent: [],
     };
   }
-
-  const records = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        return [JSON.parse(line) as LedgerRecord];
-      } catch {
-        return [];
-      }
-    });
 
   const totals = records.reduce<LedgerTotals>(
     (acc, record) => ({
@@ -392,7 +397,8 @@ async function summarizeUsageLedger(config: GatewayConfig, limit: number): Promi
 
   return {
     configured: true,
-    path: safeString(path),
+    backend,
+    path: safeString(config.storage.usageLedgerPath),
     records: records.length,
     success: records.filter((record) => record.status === "success").length,
     error: records.filter((record) => record.status === "error").length,

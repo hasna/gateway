@@ -1,6 +1,6 @@
 # Hasna Gateway
 
-Hasna Gateway is the open-source AI gateway core for Hasna apps and self-hosted teams. It exposes one stable OpenAI-compatible API while routing requests across OpenAI-compatible providers, including OpenAI, OpenRouter, DeepSeek, Qwen/DashScope, Kimi/Moonshot, Z.AI/GLM, and SiliconFlow.
+Hasna Gateway is the open-source AI gateway core for Hasna apps and self-hosted teams. It exposes one stable OpenAI-compatible API while routing requests across providers, including OpenAI, Google Gemini, OpenRouter, DeepSeek, Qwen/DashScope, Kimi/Moonshot, Z.AI/GLM, and SiliconFlow.
 
 The open-source package is useful on its own. Anyone can run it locally or on their own server, bring their own provider keys, define routing policy, and point applications at one endpoint. The hosted Hasna gateway can build on the same core while keeping accounts, billing, pooled provider contracts, discounts, tenant policy, and hosted observability private.
 
@@ -16,6 +16,16 @@ The open-source package is useful on its own. Anyone can run it locally or on th
 - Local-first defaults: no hosted Hasna calls unless explicitly configured.
 
 ## Quick Start
+
+Install the published CLI when you want to run the gateway without a source
+checkout:
+
+```bash
+bun install -g @hasna/gateway
+gateway --help
+```
+
+For source development:
 
 ```bash
 bun install
@@ -59,7 +69,7 @@ gateway serve --config gateway.config.json
 gateway-mcp --config gateway.config.json
 ```
 
-`gateway-mcp` is a stdio MCP server for local agents. It validates and inspects config, explains route choices without provider calls, manages budget definitions, checks remaining budgets, and summarizes the local usage ledger. Long-running `serve` and live `smoke` checks stay CLI-only. See [Gateway MCP server](docs/mcp.md).
+`gateway-mcp` is a stdio MCP server for local agents. It validates and inspects config, explains route choices without provider calls, manages budget definitions, checks remaining budgets, and summarizes the configured usage ledger. Long-running `serve` and live `smoke` checks stay CLI-only. See [Gateway MCP server](docs/mcp.md).
 
 ## Configuration
 
@@ -71,7 +81,7 @@ Required config examples:
 
 Provider keys are loaded from environment variables only. Do not put provider secrets in config files.
 
-Budgets live in the same JSON config and spend is calculated from the local usage ledger. Daily, monthly, and lifetime budgets require `storage.usageLedgerPath`; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
+Budgets live in the same JSON config and spend is calculated from the usage ledger. JSONL append through `storage.usageLedgerPath` is the local-first default. Daily, monthly, and lifetime budgets require either `storage.usageLedgerPath` or an explicit `storage.cloud` backend; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
 
 ## Documentation
 

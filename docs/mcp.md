@@ -38,7 +38,7 @@ const server = buildServer({ defaultConfigPath: "gateway.config.json" });
 - `gateway_budget_remaining`: calculates remaining budget for an optional gateway key fingerprint, tenant, model, and budget id.
 - `gateway_budget_add`: adds a budget definition in the selected config file. Non-dry-run writes require `confirm_write: true`; replacing an existing id also requires `replace: true`.
 - `gateway_budget_reset`: updates `resetAt` for one budget in the selected config file. Non-dry-run writes require `confirm_write: true`, and future reset timestamps are rejected.
-- `gateway_usage_summary`: summarizes the configured local JSONL usage ledger without exposing request or response bodies.
+- `gateway_usage_summary`: summarizes the configured JSONL or cloud usage ledger without exposing request or response bodies.
 
 Budget mutation tools also support `dry_run: true` to validate and preview a write without modifying the config file.
 

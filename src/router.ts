@@ -2,6 +2,7 @@ import { GatewayHttpError } from "./errors";
 import { isChinaProvider } from "./presets";
 import type {
   GatewayConfig,
+  GatewayModelCapability,
   GatewayModelConfig,
   GatewayProviderConfig,
   GatewayRouteCandidate,
@@ -166,6 +167,14 @@ function modelMap(config: GatewayConfig): Map<string, GatewayModelConfig> {
   return new Map(config.models.map((model) => [model.id, model]));
 }
 
+function dynamicCapabilitiesForProvider(provider: GatewayProviderConfig): GatewayModelCapability[] {
+  if (provider.kind === "anthropic") {
+    return ["chat", "tools", "vision", "reasoning"];
+  }
+
+  return ["chat", "streaming"];
+}
+
 function dynamicCandidate(config: GatewayConfig, id: string): GatewayRouteCandidate | undefined {
   const slash = id.indexOf("/");
   if (slash <= 0) return undefined;
@@ -181,7 +190,7 @@ function dynamicCandidate(config: GatewayConfig, id: string): GatewayRouteCandid
       providerId,
       providerModel,
       aliases: [],
-      capabilities: ["chat", "streaming"],
+      capabilities: dynamicCapabilitiesForProvider(provider),
     },
   };
 }

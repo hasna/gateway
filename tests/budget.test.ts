@@ -3,7 +3,15 @@ import { describe, expect, test } from "bun:test";
 import { getBudgetStatuses } from "../src/budget";
 import { GatewayHttpError } from "../src/errors";
 import { createChatCompletion, createChatCompletionStream } from "../src/gateway";
-import { jsonResponse, testConfig } from "./helpers";
+import { jsonResponse, testConfig, testEnv } from "./helpers";
+
+async function removeSqliteFiles(path: string): Promise<void> {
+  await Promise.all([
+    unlink(path).catch(() => undefined),
+    unlink(`${path}-shm`).catch(() => undefined),
+    unlink(`${path}-wal`).catch(() => undefined),
+  ]);
+}
 
 describe("gateway budgets", () => {
   test("reports remaining money and tokens from the local usage ledger", async () => {
@@ -52,6 +60,229 @@ describe("gateway budgets", () => {
     await unlink(path);
   });
 
+  test("reports remaining money and tokens from a cloud sqlite usage ledger across reopened configs", async () => {
+    const sqlitePath = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.sqlite`;
+    const config = testConfig();
+    config.storage.cloud = { backend: "sqlite", sqlitePath };
+    config.budgets = [
+      {
+        id: "tenant-daily",
+        window: "daily",
+        mode: "hard",
+        scope: { tenant: "acme", modelAlias: "coding" },
+        maxUsd: 0.05,
+        maxTotalTokens: 100,
+      },
+    ];
+
+    await createChatCompletion(
+      {
+        config,
+        env: testEnv(),
+        fetchImpl: async () =>
+          jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 },
+          }),
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "first" }],
+        gateway: { tenant: "acme" },
+      },
+    );
+
+    const reopenedConfig = testConfig();
+    reopenedConfig.storage.cloud = { backend: "sqlite", sqlitePath };
+    reopenedConfig.budgets = config.budgets;
+    const [status] = await getBudgetStatuses(reopenedConfig, {
+      tenant: "acme",
+      requestedModel: "coding",
+      selectedModel: "openai/gpt-4.1-mini",
+    });
+
+    expect(status?.budget.id).toBe("tenant-daily");
+    expect(status?.spent.totalTokens).toBe(25);
+    expect(status?.spent.usd).toBeGreaterThan(0);
+    expect(status?.remaining.totalTokens).toBe(75);
+    await removeSqliteFiles(sqlitePath);
+  });
+
+  test("combines existing JSONL spend with cloud ledger writes without double-counting", async () => {
+    const path = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.jsonl`;
+    const sqlitePath = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.sqlite`;
+    const config = testConfig();
+    config.storage.usageLedgerPath = path;
+    config.storage.cloud = { backend: "sqlite", sqlitePath };
+    config.budgets = [
+      {
+        id: "tenant-migration",
+        window: "lifetime",
+        mode: "hard",
+        scope: { tenant: "acme", modelAlias: "coding" },
+        maxTotalTokens: 120,
+      },
+    ];
+
+    await writeFile(
+      path,
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        status: "success",
+        provider: "openai",
+        model: "openai/gpt-4.1-mini",
+        providerModel: "gpt-4.1-mini",
+        routeMode: "fallback",
+        attempts: [],
+        context: { tenant: "acme", requestedModel: "coding", selectedModel: "openai/gpt-4.1-mini" },
+        usage: { inputTokens: 70, outputTokens: 20, totalTokens: 90 },
+        estimatedCostUsd: 0.01,
+      })}\n`,
+      "utf8",
+    );
+
+    await createChatCompletion(
+      {
+        config,
+        env: testEnv(),
+        fetchImpl: async () =>
+          jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 6, completion_tokens: 4, total_tokens: 10 },
+          }),
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "during migration" }],
+        gateway: { tenant: "acme" },
+      },
+    );
+
+    const [status] = await getBudgetStatuses(config, {
+      tenant: "acme",
+      requestedModel: "coding",
+      selectedModel: "openai/gpt-4.1-mini",
+    });
+    expect(status?.spent.totalTokens).toBe(100);
+    expect(status?.remaining.totalTokens).toBe(20);
+    await unlink(path);
+    await removeSqliteFiles(sqlitePath);
+  });
+
+  test("does not read cloud ledger storage when no configured budget needs cumulative records", async () => {
+    const cloud = { backend: "postgres" as const, connectionStringEnv: "MISSING_BUDGET_LEDGER_URL" };
+    const noBudgetsConfig = testConfig();
+    noBudgetsConfig.storage.cloud = cloud;
+    noBudgetsConfig.budgets = [];
+
+    await expect(getBudgetStatuses(noBudgetsConfig, {
+      tenant: "acme",
+      requestedModel: "coding",
+      selectedModel: "openai/gpt-4.1-mini",
+    })).resolves.toEqual([]);
+
+    const budgetIdMissConfig = testConfig();
+    budgetIdMissConfig.storage.cloud = cloud;
+    budgetIdMissConfig.budgets = [
+      {
+        id: "tenant-daily",
+        window: "daily",
+        mode: "hard",
+        scope: { tenant: "acme", modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    await expect(getBudgetStatuses(
+      budgetIdMissConfig,
+      {
+        tenant: "acme",
+        requestedModel: "coding",
+        selectedModel: "openai/gpt-4.1-mini",
+      },
+      { budgetId: "missing-budget" },
+    )).resolves.toEqual([]);
+
+    const perRequestConfig = testConfig();
+    perRequestConfig.storage.cloud = cloud;
+    perRequestConfig.budgets = [
+      {
+        id: "per-request-only",
+        window: "per-request",
+        mode: "hard",
+        scope: { tenant: "acme", modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    const [status] = await getBudgetStatuses(perRequestConfig, {
+      tenant: "acme",
+      requestedModel: "coding",
+      selectedModel: "openai/gpt-4.1-mini",
+    });
+    expect(status?.budget.id).toBe("per-request-only");
+    expect(status?.spent.totalTokens).toBe(0);
+    expect(status?.remaining.totalTokens).toBe(100);
+  });
+
+  test("still reads cloud ledger storage for matched cumulative budgets", async () => {
+    const config = testConfig();
+    config.storage.cloud = { backend: "postgres", connectionStringEnv: "MISSING_BUDGET_LEDGER_URL" };
+    config.budgets = [
+      {
+        id: "tenant-daily",
+        window: "daily",
+        mode: "hard",
+        scope: { tenant: "acme", modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    await expect(getBudgetStatuses(config, {
+      tenant: "acme",
+      requestedModel: "coding",
+      selectedModel: "openai/gpt-4.1-mini",
+    })).rejects.toMatchObject({
+      status: 500,
+    });
+  });
+
+  test("fails closed when a budgeted response cannot be persisted to the cloud ledger", async () => {
+    const config = testConfig();
+    config.storage.cloud = { backend: "postgres", connectionStringEnv: "MISSING_BUDGET_LEDGER_URL" };
+    config.budgets = [
+      {
+        id: "per-request-budgeted",
+        window: "per-request",
+        mode: "hard",
+        scope: { modelAlias: "coding" },
+        maxTotalTokens: 100,
+      },
+    ];
+
+    let providerCalls = 0;
+    await expect(createChatCompletion(
+      {
+        config,
+        env: testEnv(),
+        fetchImpl: async () => {
+          providerCalls += 1;
+          return jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+          });
+        },
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "budgeted cloud append should fail closed" }],
+      },
+    )).rejects.toMatchObject({
+      status: 500,
+    });
+    expect(providerCalls).toBe(1);
+  });
+
   test("blocks a second request before provider fetch when a hard token budget is exhausted", async () => {
     const path = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.jsonl`;
     const config = testConfig();
@@ -70,7 +301,7 @@ describe("gateway budgets", () => {
     let providerCalls = 0;
     const runtime = {
       config,
-      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+      env: testEnv(),
       fetchImpl: async () => {
         providerCalls += 1;
         return jsonResponse({
@@ -99,6 +330,73 @@ describe("gateway budgets", () => {
     await unlink(path);
   });
 
+  test("blocks a second request after reopening the cloud sqlite budget ledger", async () => {
+    const sqlitePath = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.sqlite`;
+    const makeConfig = () => {
+      const config = testConfig();
+      config.storage.cloud = { backend: "sqlite", sqlitePath };
+      config.budgets = [
+        {
+          id: "tiny-tenant",
+          window: "lifetime",
+          mode: "hard",
+          scope: { tenant: "acme", modelAlias: "coding" },
+          maxTotalTokens: 2,
+          maxUsd: 0.01,
+        },
+      ];
+      return config;
+    };
+
+    let firstProviderCalls = 0;
+    await createChatCompletion(
+      {
+        config: makeConfig(),
+        env: testEnv(),
+        fetchImpl: async () => {
+          firstProviderCalls += 1;
+          return jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          });
+        },
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "first" }],
+        gateway: { tenant: "acme" },
+      },
+    );
+
+    let secondProviderCalls = 0;
+    await expect(createChatCompletion(
+      {
+        config: makeConfig(),
+        env: testEnv(),
+        fetchImpl: async () => {
+          secondProviderCalls += 1;
+          return jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "too late" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          });
+        },
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "second" }],
+        gateway: { tenant: "acme" },
+      },
+    )).rejects.toMatchObject({
+      status: 402,
+      type: "gateway_budget_error",
+      code: "budget_exceeded",
+    });
+
+    expect(firstProviderCalls).toBe(1);
+    expect(secondProviderCalls).toBe(0);
+    await removeSqliteFiles(sqlitePath);
+  });
+
   test("rejects an over-budget non-streaming response and records the spend", async () => {
     const path = `/tmp/hasna-gateway-budget-ledger-${crypto.randomUUID()}.jsonl`;
     const config = testConfig();
@@ -118,7 +416,7 @@ describe("gateway budgets", () => {
       await createChatCompletion(
         {
           config,
-          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+          env: testEnv(),
           fetchImpl: async () =>
             jsonResponse({
               choices: [{ index: 0, message: { role: "assistant", content: "too much" }, finish_reason: "stop" }],
@@ -157,7 +455,7 @@ describe("gateway budgets", () => {
     await expect(createChatCompletion(
       {
         config,
-        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        env: testEnv(),
         fetchImpl: async () => {
           providerCalls += 1;
           return jsonResponse({
@@ -197,7 +495,7 @@ describe("gateway budgets", () => {
       await createChatCompletion(
         {
           config,
-          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+          env: testEnv(),
           fetchImpl: async () =>
             jsonResponse({
               choices: [{ index: 0, message: { role: "assistant", content: "unpriced" }, finish_reason: "stop" }],
@@ -241,7 +539,7 @@ describe("gateway budgets", () => {
       await createChatCompletion(
         {
           config,
-          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+          env: testEnv(),
           fetchImpl: async () =>
             jsonResponse({
               choices: [{ index: 0, message: { role: "assistant", content: "unpriced output" }, finish_reason: "stop" }],
@@ -279,7 +577,7 @@ describe("gateway budgets", () => {
     const response = await createChatCompletionStream(
       {
         config,
-        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        env: testEnv(),
         fetchImpl: async () =>
           new Response(
             [
@@ -325,7 +623,7 @@ describe("gateway budgets", () => {
     const response = await createChatCompletionStream(
       {
         config,
-        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        env: testEnv(),
         fetchImpl: async (_input, init) => {
           providerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
           return new Response(

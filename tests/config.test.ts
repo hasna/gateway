@@ -37,7 +37,7 @@ describe("config validation", () => {
     }
   });
 
-  test("rejects cumulative budgets without a usage ledger path", () => {
+  test("rejects cumulative budgets without a usage ledger backend", () => {
     const config = testConfig();
     config.budgets = [
       {
@@ -51,7 +51,77 @@ describe("config validation", () => {
     const result = validateConfig(config);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors.join("\n")).toContain("requires storage.usageLedgerPath");
+      expect(result.errors.join("\n")).toContain("requires a usage ledger backend");
+    }
+  });
+
+  test("accepts cumulative budgets with a cloud sqlite ledger backend", () => {
+    const config = testConfig();
+    config.storage.cloud = {
+      backend: "sqlite",
+      sqlitePath: `/tmp/hasna-gateway-config-${crypto.randomUUID()}.sqlite`,
+    };
+    config.budgets = [
+      {
+        id: "daily",
+        window: "daily",
+        mode: "hard",
+        maxTotalTokens: 100,
+      },
+    ];
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(true);
+  });
+
+  test("rejects postgres cloud ledger backend without a connection source", () => {
+    const config = testConfig();
+    config.storage.cloud = {
+      backend: "postgres",
+    };
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("requires connectionString or connectionStringEnv");
+    }
+  });
+
+  test("accepts optional per-gateway-key rate limits", () => {
+    const config = testConfig();
+    config.server.rateLimits = {
+      perGatewayKey: {
+        requestsPerMinute: 2,
+        tokensPerMinute: 100,
+      },
+    };
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.server.rateLimits?.perGatewayKey?.requestsPerMinute).toBe(2);
+      expect(result.config.server.rateLimits?.perGatewayKey?.tokensPerMinute).toBe(100);
+    }
+  });
+
+  test("rejects invalid per-gateway-key rate limit values", () => {
+    const result = validateConfig({
+      server: {
+        rateLimits: {
+          perGatewayKey: {
+            requestsPerMinute: 0,
+            // @ts-expect-error exercising runtime config validation
+            tokensPerMinute: "100",
+          },
+        },
+      },
+      presets: ["openai"],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("server.rateLimits.perGatewayKey.requestsPerMinute");
+      expect(result.errors.join("\n")).toContain("server.rateLimits.perGatewayKey.tokensPerMinute");
     }
   });
 
@@ -90,11 +160,18 @@ describe("config validation", () => {
   });
 
   test("expands presets", () => {
-    const result = validateConfig({ presets: ["openai", "deepseek"] });
+    const result = validateConfig({ presets: ["openai", "google", "deepseek"] });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.config.providers.map((provider) => provider.id)).toContain("openai");
+      expect(result.config.providers.map((provider) => provider.id)).toContain("google");
       expect(result.config.providers.map((provider) => provider.id)).toContain("deepseek");
+      expect(result.config.providers.find((provider) => provider.id === "google")?.dataPolicy).toMatchObject({
+        allowTraining: true,
+        allowLogging: true,
+        byokOnly: true,
+      });
+      expect(result.config.models.some((model) => model.providerId === "google")).toBe(true);
       expect(result.config.models.some((model) => model.providerId === "deepseek")).toBe(true);
     }
   });

@@ -166,6 +166,31 @@ describe("gateway MCP server", () => {
     }
   });
 
+  test("omits cloud storage connection strings from config inspection", async () => {
+    const configPath = join(tempDir(), "gateway.config.json");
+    const config = testConfig();
+    config.storage.cloud = {
+      backend: "postgres",
+      connectionString: "redaction-sentinel-value",
+      connectionStringEnv: "GATEWAY_POSTGRES_URL",
+    };
+    await Bun.write(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    const { client, close } = await connectClient(configPath);
+    try {
+      const inspect = parseToolText(await client.callTool({ name: "gateway_inspect_config", arguments: {} }));
+      const text = JSON.stringify(inspect);
+      expect(inspect.storage.cloud).toEqual({
+        backend: "postgres",
+        connectionStringConfigured: true,
+        connectionStringEnv: "GATEWAY_POSTGRES_URL",
+      });
+      expect(text).not.toContain("redaction-sentinel-value");
+    } finally {
+      await close();
+    }
+  });
+
   test("denies per-call config path overrides by default", async () => {
     const configPath = join(tempDir(), "gateway.config.json");
     const otherConfigPath = join(tempDir(), "other-gateway.config.json");
