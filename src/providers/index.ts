@@ -30,4 +30,4 @@ export {
   toOpenAIChatCompletionResponse,
 } from "./anthropic";
 export { GoogleGeminiAdapter, googleGeminiOpenAIBaseUrl } from "./google-gemini";
-export { OpenAICompatibleAdapter, toProviderChatBody } from "./openai-compatible";
+export { OpenAICompatibleAdapter, toProviderChatBody, toProviderEmbeddingsBody } from "./openai-compatible";

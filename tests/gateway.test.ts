@@ -1,6 +1,12 @@
+import { unlink } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import { GatewayHttpError } from "../src/errors";
-import { createChatCompletion, createChatCompletionStream, providerErrorMessageFromBody } from "../src/gateway";
+import {
+  createChatCompletion,
+  createChatCompletionStream,
+  createEmbeddings,
+  providerErrorMessageFromBody,
+} from "../src/gateway";
 import { testConfig, jsonResponse } from "./helpers";
 
 const env = {
@@ -858,5 +864,125 @@ describe("chat completion lifecycle", () => {
         },
       },
     );
+  });
+
+  test("normalizes embeddings response with gateway metadata and ledger usage", async () => {
+    const path = `/tmp/hasna-gateway-embeddings-ledger-${crypto.randomUUID()}.jsonl`;
+    const config = testConfig();
+    config.storage.usageLedgerPath = path;
+    config.budgets = [
+      {
+        id: "embedding-request",
+        window: "per-request",
+        mode: "hard",
+        scope: { modelAlias: "embeddings" },
+        maxTotalTokens: 10,
+      },
+    ];
+
+    const calls: string[] = [];
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      calls.push(String(url));
+      const providerBody = JSON.parse(String(init?.body));
+      expect(providerBody).toEqual({
+        model: "text-embedding-3-small",
+        input: "do not write embedding input",
+      });
+      return jsonResponse({
+        object: "list",
+        data: [{ object: "embedding", index: 0, embedding: [0.1, 0.2] }],
+        model: "text-embedding-3-small",
+        usage: {
+          prompt_tokens: 4,
+          total_tokens: 4,
+        },
+      });
+    };
+
+    const result = await createEmbeddings(
+      {
+        config,
+        env: {
+          GATEWAY_API_KEY: "gateway",
+          OPENAI_API_KEY: "openai",
+        },
+        fetchImpl,
+      },
+      {
+        model: "embeddings",
+        input: "do not write embedding input",
+      },
+    );
+
+    expect(calls).toEqual(["https://api.openai.test/v1/embeddings"]);
+    expect(result.body.object).toBe("list");
+    expect(result.body.model).toBe("openai/text-embedding-3-small");
+    expect(result.body.usage).toEqual({
+      prompt_tokens: 4,
+      total_tokens: 4,
+    });
+    expect((result.body.gateway as Record<string, unknown>).provider).toBe("openai");
+    expect(((result.body.gateway as Record<string, unknown>).budgets as Array<{ remaining: { totalTokens: number } }>)[0]?.remaining.totalTokens).toBe(6);
+
+    const ledgerText = await Bun.file(path).text();
+    const record = JSON.parse(ledgerText.trim());
+    expect(record.provider).toBe("openai");
+    expect(record.model).toBe("openai/text-embedding-3-small");
+    expect(record.usage).toEqual({
+      inputTokens: 4,
+      outputTokens: 0,
+      totalTokens: 4,
+    });
+    expect(ledgerText).not.toContain("do not write embedding input");
+    await unlink(path);
+  });
+
+  test("rejects over-budget embeddings responses after recording usage", async () => {
+    const path = `/tmp/hasna-gateway-embeddings-ledger-${crypto.randomUUID()}.jsonl`;
+    const config = testConfig();
+    config.storage.usageLedgerPath = path;
+    config.budgets = [
+      {
+        id: "tiny-embedding-request",
+        window: "per-request",
+        mode: "hard",
+        scope: { modelAlias: "embeddings" },
+        maxTotalTokens: 1,
+      },
+    ];
+
+    let thrown: unknown;
+    try {
+      await createEmbeddings(
+        {
+          config,
+          env: {
+            GATEWAY_API_KEY: "gateway",
+            OPENAI_API_KEY: "openai",
+          },
+          fetchImpl: async () =>
+            jsonResponse({
+              object: "list",
+              data: [{ object: "embedding", index: 0, embedding: [0.1, 0.2] }],
+              usage: {
+                prompt_tokens: 2,
+                total_tokens: 2,
+              },
+            }),
+        },
+        {
+          model: "embeddings",
+          input: "too many tokens",
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(GatewayHttpError);
+    expect(thrown).toMatchObject({ status: 402, code: "budget_exceeded" });
+    const ledgerText = await Bun.file(path).text();
+    expect(ledgerText).toContain('"totalTokens":2');
+    await unlink(path);
   });
 });

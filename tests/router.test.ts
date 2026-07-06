@@ -668,4 +668,61 @@ describe("routing policy", () => {
     expect(result.decision.selected).toBe("openai/first");
     expect(result.decision.scores?.length).toBe(2);
   });
+
+  test("routes embeddings only to embeddings-capable models", () => {
+    const config = testConfig();
+    config.routes.push({
+      id: "mixed-embeddings",
+      mode: "fallback",
+      modelAliases: ["mixed-embeddings"],
+      fallbackModelIds: ["openai/gpt-4.1-mini", "openai/text-embedding-3-small"],
+      dataPolicy: {
+        allowTraining: false,
+        allowChineseProviders: false,
+        blockedRegions: ["cn"],
+      },
+    });
+
+    const result = resolveRoute(
+      {
+        config,
+        env: {
+          GATEWAY_API_KEY: "gateway",
+          OPENAI_API_KEY: "openai",
+        },
+      },
+      {
+        model: "mixed-embeddings",
+        input: "hello",
+      },
+      { operation: "embeddings" },
+    );
+
+    expect(result.decision.selected).toBe("openai/text-embedding-3-small");
+    expect(result.decision.attempts[0]?.status).toBe("skipped");
+    expect(result.decision.attempts[0]?.reason).toBe("model does not support embeddings");
+  });
+
+  test("keeps chat routing scoped to chat-capable models", () => {
+    const config = testConfig();
+    config.routes[0] = {
+      ...config.routes[0]!,
+      fallbackModelIds: ["openai/text-embedding-3-small", "openai/gpt-4.1-mini"],
+    };
+
+    const result = resolveRoute(
+      {
+        config,
+        env: {
+          GATEWAY_API_KEY: "gateway",
+          OPENAI_API_KEY: "openai",
+        },
+      },
+      request,
+    );
+
+    expect(result.decision.selected).toBe("openai/gpt-4.1-mini");
+    expect(result.decision.attempts[0]?.status).toBe("skipped");
+    expect(result.decision.attempts[0]?.reason).toBe("model does not support chat");
+  });
 });

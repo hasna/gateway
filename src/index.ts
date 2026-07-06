@@ -6,7 +6,7 @@ export {
   validateRuntimeSecrets,
 } from "./config";
 export { GatewayHttpError, gatewayErrorResponse, jsonError } from "./errors";
-export { createChatCompletion, createChatCompletionStream } from "./gateway";
+export { createChatCompletion, createChatCompletionStream, createEmbeddings } from "./gateway";
 export { appendUsageLedger } from "./ledger";
 export { toCapabilityCard, toCapabilityCards, toCostEstimate, toDecisionEnvelope } from "./lib/contracts";
 export {
@@ -53,6 +53,7 @@ export type {
   GatewayRateLimitConfig,
   GatewayRequestOptions,
   GatewayResponseCacheConfig,
+  GatewayRoutableRequest,
   GatewayRouteAttempt,
   GatewayRouteCandidate,
   GatewayRouteDecision,
@@ -65,8 +66,13 @@ export type {
   GatewayServerConfigInput,
   GatewayUsage,
   OpenAIChatCompletionRequest,
+  OpenAIEmbeddingsInput,
+  OpenAIEmbeddingsRequest,
+  OpenAIEmbeddingsUsage,
   OpenAIUsage,
   ProviderAdapter,
   ProviderBuildInput,
+  ProviderBuildBaseInput,
+  ProviderEmbeddingsBuildInput,
   ProviderHttpRequest,
 } from "./types";

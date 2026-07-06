@@ -746,6 +746,101 @@ describe("HTTP server handler", () => {
     const text = await response.text();
     expect(text).toContain("data: [DONE]");
   });
+
+  test("handles embeddings", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+      fetchImpl: async (url, init) => {
+        expect(String(url)).toBe("https://api.openai.test/v1/embeddings");
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          model: "text-embedding-3-small",
+          input: ["alpha", "beta"],
+        });
+        return jsonResponse({
+          object: "list",
+          data: [
+            { object: "embedding", index: 0, embedding: [0.1] },
+            { object: "embedding", index: 1, embedding: [0.2] },
+          ],
+          usage: { prompt_tokens: 4, total_tokens: 4 },
+        });
+      },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/embeddings", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "embeddings", input: ["alpha", "beta"] }),
+      }),
+    );
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.object).toBe("list");
+    expect(body.model).toBe("openai/text-embedding-3-small");
+    expect(body.usage).toEqual({ prompt_tokens: 4, total_tokens: 4 });
+    expect(body.gateway.provider).toBe("openai");
+  });
+
+  test("rejects malformed embeddings requests", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/embeddings", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "embeddings" }),
+      }),
+    );
+    const body = await response.json();
+    expect(response.status).toBe(400);
+    expect(body.error.code).toBe("missing_input");
+  });
+
+  test("enforces per-gateway-key RPM on embeddings before provider fetch", async () => {
+    const config = testConfig();
+    config.server.rateLimits = { perGatewayKey: { requestsPerMinute: 1 } };
+    let providerCalls = 0;
+    const handler = createGatewayHandler({
+      config,
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+      fetchImpl: async () => {
+        providerCalls += 1;
+        return jsonResponse({
+          object: "list",
+          data: [{ object: "embedding", index: 0, embedding: [0.1] }],
+          usage: { prompt_tokens: 4, total_tokens: 4 },
+        });
+      },
+    });
+
+    const embeddingsRequest = () =>
+      new Request("http://localhost/v1/embeddings", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "embeddings", input: "hello" }),
+      });
+
+    const allowed = await handler(embeddingsRequest());
+    const rejected = await handler(embeddingsRequest());
+    const body = await rejected.json();
+
+    expect(allowed.status).toBe(200);
+    expect(rejected.status).toBe(429);
+    expect(body.error.type).toBe("gateway_rate_limit_error");
+    expect(providerCalls).toBe(1);
+  });
 });
 
 function chatRequest(token: string, overrides: Record<string, unknown> = {}): Request {

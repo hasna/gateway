@@ -11,13 +11,21 @@ import type {
   GatewayModelCapability,
   GatewayModelConfig,
   GatewayProviderConfig,
+  GatewayRoutableRequest,
   GatewayRouteCandidate,
   GatewayRouteDecision,
   GatewayRoutePolicy,
   GatewayRouteScore,
   GatewayRuntimeOptions,
   OpenAIChatCompletionRequest,
+  OpenAIEmbeddingsRequest,
 } from "./types";
+
+type GatewayRouteOperation = "chat" | "embeddings";
+
+type ResolveRouteOptions = {
+  operation?: GatewayRouteOperation;
+};
 
 type EffectivePolicy = {
   allowedProviders?: string[];
@@ -96,7 +104,7 @@ function strictMax(
 function mergePolicy(
   config: GatewayConfig,
   route: GatewayRoutePolicy | undefined,
-  request: OpenAIChatCompletionRequest,
+  request: GatewayRoutableRequest,
 ): EffectivePolicy {
   const requestPolicy = request.gateway;
   const configPolicy = config.policy;
@@ -168,7 +176,7 @@ function mergePolicy(
   };
 }
 
-function routeMode(route: GatewayRoutePolicy | undefined, request: OpenAIChatCompletionRequest): GatewayRoutePolicy["mode"] {
+function routeMode(route: GatewayRoutePolicy | undefined, request: GatewayRoutableRequest): GatewayRoutePolicy["mode"] {
   return request.gateway?.routing ?? route?.mode ?? "fallback";
 }
 
@@ -192,13 +200,15 @@ function dynamicCapabilitiesForProvider(provider: GatewayProviderConfig): Gatewa
   return ["chat", "streaming"];
 }
 
-function dynamicCandidate(config: GatewayConfig, id: string): GatewayRouteCandidate | undefined {
+function dynamicCandidate(config: GatewayConfig, id: string, operation: GatewayRouteOperation): GatewayRouteCandidate | undefined {
   const slash = id.indexOf("/");
   if (slash <= 0) return undefined;
   const providerId = id.slice(0, slash);
   const providerModel = id.slice(slash + 1);
   const provider = providerMap(config).get(providerId);
   if (!provider) return undefined;
+  const capabilities: GatewayModelCapability[] =
+    operation === "embeddings" ? ["embeddings"] : dynamicCapabilitiesForProvider(provider);
 
   return {
     provider,
@@ -207,12 +217,16 @@ function dynamicCandidate(config: GatewayConfig, id: string): GatewayRouteCandid
       providerId,
       providerModel,
       aliases: [],
-      capabilities: dynamicCapabilitiesForProvider(provider),
+      capabilities,
     },
   };
 }
 
-function initialCandidates(config: GatewayConfig, request: OpenAIChatCompletionRequest): GatewayRouteCandidate[] {
+function initialCandidates(
+  config: GatewayConfig,
+  request: GatewayRoutableRequest,
+  operation: GatewayRouteOperation,
+): GatewayRouteCandidate[] {
   const providers = providerMap(config);
   const models = modelMap(config);
   const route = routeForRequest(config, request.model);
@@ -223,7 +237,7 @@ function initialCandidates(config: GatewayConfig, request: OpenAIChatCompletionR
     return provider ? [{ model: explicit, provider }] : [];
   }
 
-  const dynamic = dynamicCandidate(config, request.model);
+  const dynamic = dynamicCandidate(config, request.model, operation);
   if (dynamic) return [dynamic];
 
   if (route?.fallbackModelIds?.length) {
@@ -285,9 +299,10 @@ function hasAllowedRegion(provider: GatewayProviderConfig, policy: EffectivePoli
 
 function candidateSkipReason(
   candidate: GatewayRouteCandidate,
-  request: OpenAIChatCompletionRequest,
+  request: GatewayRoutableRequest,
   policy: EffectivePolicy,
   env: Record<string, string | undefined>,
+  operation: GatewayRouteOperation,
 ): string | undefined {
   const { model, provider } = candidate;
 
@@ -311,10 +326,15 @@ function candidateSkipReason(
   if (missingHeaderEnvs.length > 0) {
     return `provider required header env ${missingHeaderEnvs.join(", ")} is not set`;
   }
-  if (!model.capabilities.includes("chat")) return "model does not support chat";
-  if (request.stream && !model.capabilities.includes("streaming")) return "model does not support streaming";
-  if (request.tools && request.tools.length > 0 && !model.capabilities.includes("tools")) {
-    return "model does not support tools";
+  if (operation === "embeddings") {
+    if (!model.capabilities.includes("embeddings")) return "model does not support embeddings";
+  } else {
+    const chatRequest = request as OpenAIChatCompletionRequest;
+    if (!model.capabilities.includes("chat")) return "model does not support chat";
+    if (chatRequest.stream && !model.capabilities.includes("streaming")) return "model does not support streaming";
+    if (chatRequest.tools && chatRequest.tools.length > 0 && !model.capabilities.includes("tools")) {
+      return "model does not support tools";
+    }
   }
   if (request.response_format && !model.capabilities.includes("json")) return "model does not support json output";
   for (const capability of request.gateway?.required_capabilities ?? []) {
@@ -369,22 +389,31 @@ function configuredTokenPrice(candidate: GatewayRouteCandidate): number {
   return candidate.model.inputUsdPerMillionTokens! + candidate.model.outputUsdPerMillionTokens!;
 }
 
-function estimateInputTokens(request: OpenAIChatCompletionRequest): number {
+function estimateInputTokens(request: GatewayRoutableRequest): number {
   if (request.gateway?.expected_input_tokens !== undefined) return request.gateway.expected_input_tokens;
-  const chars = request.messages.reduce((sum, message) => {
-    if (typeof message.content === "string") return sum + message.content.length;
-    if (Array.isArray(message.content)) return sum + JSON.stringify(message.content).length;
-    return sum;
-  }, 0);
+  const messages = (request as OpenAIChatCompletionRequest).messages;
+  let chars = 0;
+  if (Array.isArray(messages)) {
+    chars = messages.reduce((sum, message) => {
+      if (typeof message.content === "string") return sum + message.content.length;
+      if (Array.isArray(message.content)) return sum + JSON.stringify(message.content).length;
+      return sum;
+    }, 0);
+  } else {
+    // Embeddings and other non-chat requests carry their content in `input`.
+    const input = (request as OpenAIEmbeddingsRequest).input;
+    if (typeof input === "string") chars = input.length;
+    else if (Array.isArray(input)) chars = JSON.stringify(input).length;
+  }
   return Math.max(1, Math.ceil(chars / 4));
 }
 
-function estimateOutputTokens(request: OpenAIChatCompletionRequest): number {
+function estimateOutputTokens(request: GatewayRoutableRequest): number {
   const maxTokens = request.max_completion_tokens ?? request.max_tokens;
   return typeof maxTokens === "number" && maxTokens > 0 ? maxTokens : 512;
 }
 
-function estimatedRequestCost(candidate: GatewayRouteCandidate, request: OpenAIChatCompletionRequest): number | undefined {
+function estimatedRequestCost(candidate: GatewayRouteCandidate, request: GatewayRoutableRequest): number | undefined {
   if (!candidateHasConfiguredPrice(candidate)) return undefined;
   return (
     (estimateInputTokens(request) / 1_000_000) * candidate.model.inputUsdPerMillionTokens! +
@@ -437,13 +466,13 @@ function hashString(value: string): number {
   return hash >>> 0;
 }
 
-function stickyTieBreaker(candidate: GatewayRouteCandidate, request: OpenAIChatCompletionRequest): number {
+function stickyTieBreaker(candidate: GatewayRouteCandidate, request: GatewayRoutableRequest): number {
   const sessionId = request.gateway?.sticky_session_id ?? request.gateway?.session_id ?? request.session_id;
   if (!sessionId) return 0;
   return hashString(`${sessionId}:${candidate.model.id}`) / 0xffffffff;
 }
 
-function providerOrderScore(candidate: GatewayRouteCandidate, request: OpenAIChatCompletionRequest): number | undefined {
+function providerOrderScore(candidate: GatewayRouteCandidate, request: GatewayRoutableRequest): number | undefined {
   const order = request.gateway?.provider_order;
   if (!order?.length) return undefined;
   const index = order.indexOf(candidate.provider.id);
@@ -453,7 +482,7 @@ function providerOrderScore(candidate: GatewayRouteCandidate, request: OpenAICha
 
 function weightsForMode(
   mode: GatewayRoutePolicy["mode"],
-  request: OpenAIChatCompletionRequest,
+  request: GatewayRoutableRequest,
 ): Record<"cost" | "quality" | "latency" | "success" | "throughput" | "providerOrder", number> {
   if (mode === "lowest-latency") {
     return { cost: 0.1, quality: 0.1, latency: 0.55, success: 0.2, throughput: 0, providerOrder: 0.05 };
@@ -487,7 +516,7 @@ function weightsForMode(
 function scoreCandidates(
   candidates: GatewayRouteCandidate[],
   mode: GatewayRoutePolicy["mode"],
-  request: OpenAIChatCompletionRequest,
+  request: GatewayRoutableRequest,
 ): GatewayRouteScore[] {
   const costs = candidates.map((candidate) => estimatedRequestCost(candidate, request));
   const latencies = candidates.map((candidate) => candidate.model.averageLatencyMs);
@@ -540,7 +569,7 @@ function originalIndexMap(candidates: GatewayRouteCandidate[]): Map<string, numb
 function sortCandidates(
   candidates: GatewayRouteCandidate[],
   mode: GatewayRoutePolicy["mode"],
-  request: OpenAIChatCompletionRequest,
+  request: GatewayRoutableRequest,
 ): { sorted: GatewayRouteCandidate[]; scores?: GatewayRouteScore[] } {
   const indexes = originalIndexMap(candidates);
   const byOriginalOrder = (a: GatewayRouteCandidate, b: GatewayRouteCandidate): number =>
@@ -595,12 +624,17 @@ function policyForDecision(policy: EffectivePolicy): GatewayRouteDecision["polic
   };
 }
 
-export function resolveRoute(options: GatewayRuntimeOptions, request: OpenAIChatCompletionRequest): ResolveResult {
+export function resolveRoute(
+  options: GatewayRuntimeOptions,
+  request: GatewayRoutableRequest,
+  resolveOptions: ResolveRouteOptions = {},
+): ResolveResult {
+  const operation = resolveOptions.operation ?? "chat";
   const route = routeForRequest(options.config, request.model);
   const mode = routeMode(route, request);
   const policy = mergePolicy(options.config, route, request);
   const env = options.env ?? process.env;
-  const candidates = initialCandidates(options.config, request);
+  const candidates = initialCandidates(options.config, request, operation);
   const decision: GatewayRouteDecision = {
     requested_model: request.model,
     resolved_candidates: unique(candidates.map((candidate) => candidate.model.id)),
@@ -612,7 +646,7 @@ export function resolveRoute(options: GatewayRuntimeOptions, request: OpenAIChat
 
   const eligible: GatewayRouteCandidate[] = [];
   for (const candidate of candidates) {
-    const reason = candidateSkipReason(candidate, request, policy, env);
+    const reason = candidateSkipReason(candidate, request, policy, env, operation);
     if (reason) {
       decision.attempts.push({
         provider: candidate.provider.id,

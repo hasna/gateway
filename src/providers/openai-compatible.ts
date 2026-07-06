@@ -5,8 +5,10 @@ import type {
   GatewayProviderConfig,
   GatewayProviderError,
   OpenAIChatCompletionRequest,
+  OpenAIEmbeddingsRequest,
   ProviderAdapter,
   ProviderBuildInput,
+  ProviderEmbeddingsBuildInput,
   ProviderHttpRequest,
 } from "../types";
 
@@ -56,6 +58,14 @@ const openRouterProviderFields = new Set([
 ]);
 
 const vercelGatewayFields = new Set(["models", "order", "only", "caching", "providerTimeouts"]);
+
+const embeddingsForwardedFields = new Set([
+  "model",
+  "input",
+  "encoding_format",
+  "dimensions",
+  "user",
+]);
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
@@ -241,6 +251,18 @@ export function toProviderChatBody(
   return body;
 }
 
+export function toProviderEmbeddingsBody(request: OpenAIEmbeddingsRequest, providerModel: string): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(request)) {
+    if (embeddingsForwardedFields.has(key) && value !== undefined) {
+      body[key] = value;
+    }
+  }
+
+  body.model = providerModel;
+  return body;
+}
+
 function createAbortSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
   if (signal) return signal;
   return AbortSignal.timeout(timeoutMs);
@@ -249,7 +271,7 @@ function createAbortSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly id = "openai-compatible";
   readonly kind = "openai-compatible";
-  readonly supports: GatewayModelCapability[] = ["chat", "streaming", "tools", "json"];
+  readonly supports: GatewayModelCapability[] = ["chat", "streaming", "tools", "json", "embeddings"];
 
   buildRequest(input: ProviderBuildInput): ProviderHttpRequest {
     const baseUrl = providerBaseUrl(input.provider, input.env);
@@ -277,6 +299,33 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     };
   }
 
+  buildEmbeddingsRequest(input: ProviderEmbeddingsBuildInput): ProviderHttpRequest {
+    if (!input.provider.baseUrl) {
+      throw new Error(`Provider ${input.provider.id} does not define a baseUrl.`);
+    }
+
+    const body = toProviderEmbeddingsBody(input.request, input.model.providerModel);
+
+    return {
+      url: joinUrl(input.provider.baseUrl, "/embeddings"),
+      init: {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${input.apiKey}`,
+          ...(input.provider.id === "openrouter"
+            ? {
+                "http-referer": "https://github.com/hasna/open-gateway",
+                "x-title": "Hasna Gateway",
+              }
+            : {}),
+        },
+        body: JSON.stringify(body),
+        signal: createAbortSignal(input.timeoutMs, input.signal),
+      },
+    };
+  }
+
   send(input: ProviderBuildInput): Promise<Response> {
     const request = this.buildRequest({
       ...input,
@@ -296,6 +345,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         stream: true,
       },
     });
+    return (input.fetchImpl ?? fetch)(request.url, request.init);
+  }
+
+  embed(input: ProviderEmbeddingsBuildInput): Promise<Response> {
+    const request = this.buildEmbeddingsRequest(input);
     return (input.fetchImpl ?? fetch)(request.url, request.init);
   }
 
