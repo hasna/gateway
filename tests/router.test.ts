@@ -195,6 +195,42 @@ describe("routing policy", () => {
     ).toThrow(GatewayHttpError);
   });
 
+  test("does not advertise dynamic Anthropic routes as streaming-capable", () => {
+    const config = testConfig();
+    config.providers.push({
+      id: "anthropic",
+      displayName: "Anthropic",
+      kind: "anthropic",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKeyEnv: "ANTHROPIC_API_KEY",
+      enabled: true,
+      regions: ["us"],
+      dataPolicy: {
+        allowTraining: false,
+        allowLogging: false,
+        byokOnly: true,
+        zeroDataRetentionAvailable: false,
+      },
+    });
+
+    expect(() =>
+      resolveRoute(
+        {
+          config,
+          env: {
+            GATEWAY_API_KEY: "gateway",
+            ANTHROPIC_API_KEY: "anthropic",
+          },
+        },
+        {
+          ...request,
+          model: "anthropic/claude-3-5-sonnet-latest",
+          stream: true,
+        },
+      ),
+    ).toThrow("No allowed provider can satisfy model 'anthropic/claude-3-5-sonnet-latest'.");
+  });
+
   test("fails cheapest routing when all eligible candidates are unpriced", () => {
     const config = testConfig();
     config.models = config.models.map((model) => ({
