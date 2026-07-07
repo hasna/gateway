@@ -7,7 +7,8 @@
   "types": "dist/index.d.ts",
   "bin": {
     "gateway": "dist/cli/index.js",
-    "gateway-mcp": "dist/mcp/index.js"
+    "gateway-mcp": "dist/mcp/index.js",
+    "gateway-serve": "dist/serve.js"
   },
   "exports": {
     ".": {
@@ -20,6 +21,9 @@
     "./mcp": {
       "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js"
+    },
+    "./serve": {
+      "import": "./dist/serve.js"
     }
   },
   "files": [
@@ -29,12 +33,13 @@
     "LICENSE",
     "README.md",
     ".env.example",
+    "hasna.contract.json",
     "gateway.config.example.json",
     "gateway.config.china.example.json",
     "gateway.config.no-china.example.json"
   ],
   "scripts": {
-    "build": "rm -rf dist && bun build src/index.ts src/cli/index.ts src/mcp/index.ts --outdir dist --target bun && tsc -p tsconfig.build.json && chmod +x dist/cli/index.js dist/mcp/index.js",
+    "build": "rm -rf dist && bun build src/index.ts src/cli/index.ts src/mcp/index.ts src/serve.ts --outdir dist --target bun && tsc -p tsconfig.build.json && chmod +x dist/cli/index.js dist/mcp/index.js dist/serve.js",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test && bun run build",
     "test": "bun test",

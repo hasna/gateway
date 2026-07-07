@@ -66,8 +66,13 @@ After installation as a package, the CLI binary is `gateway`:
 
 ```bash
 gateway serve --config gateway.config.json
+gateway-serve --config gateway.config.json
 gateway-mcp --config gateway.config.json
 ```
+
+`gateway-serve` is the package-level service binary for local and self-hosted
+HTTP runtime smoke checks. It exposes `GET /health`, authenticated `GET /ready`,
+`GET /version`, `GET /v1/models`, and `POST /v1/chat/completions`.
 
 `gateway-mcp` is a stdio MCP server for local agents. It validates and inspects config, explains route choices without provider calls, manages budget definitions, checks remaining budgets, and summarizes the configured usage ledger. Long-running `serve` and live `smoke` checks stay CLI-only. See [Gateway MCP server](docs/mcp.md).
 

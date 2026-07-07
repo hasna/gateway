@@ -10,6 +10,7 @@ export function testConfig(): GatewayConfig {
       maxRequestBodyBytes: 100000,
       includeGatewayMetadata: true,
       maxFallbackAttempts: 3,
+      corsAllowedOrigins: ["http://127.0.0.1:8787", "http://localhost:8787"],
     },
     auth: {
       apiKeyEnv: "GATEWAY_API_KEY",

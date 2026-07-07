@@ -1,0 +1,73 @@
+{
+  "$schema": "https://github.com/hasna/contracts/schema/hasna.service_contract.v1.json",
+  "schema": "hasna.service_contract.v1",
+  "name": "gateway",
+  "class": "service",
+  "contractVersion": "v1",
+  "kitVersion": "0.4.1",
+  "description": "Open-source AI model gateway core for local and self-hosted OpenAI-compatible routing.",
+  "bins": ["gateway", "gateway-mcp", "gateway-serve"],
+  "deploymentModes": ["local", "self-hosted"],
+  "serviceSurfaces": [
+    {
+      "name": "http",
+      "status": "supported",
+      "bin": "gateway-serve",
+      "mcpBin": "gateway-mcp",
+      "authMode": "api-key",
+      "deploymentModes": ["local", "self-hosted"],
+      "health": { "method": "GET", "path": "/health", "public": true },
+      "readiness": { "method": "GET", "path": "/ready", "public": false },
+      "version": { "method": "GET", "path": "/version", "public": true },
+      "apiBasePath": "/v1",
+      "readinessGates": [
+        {
+          "id": "gateway-auth-required",
+          "kind": "auth",
+          "required": true,
+          "command": "bun test tests/server.test.ts",
+          "status": "pending",
+          "summary": "Non-health lifecycle and /v1 routes require the configured gateway bearer token."
+        },
+        {
+          "id": "provider-secret-env",
+          "kind": "secret-ref",
+          "required": true,
+          "command": "bun run src/cli/index.ts validate --config gateway.config.example.json",
+          "status": "pending",
+          "summary": "Provider credentials are environment references; config validation must not require or print raw values."
+        },
+        {
+          "id": "budget-ledger",
+          "kind": "storage",
+          "required": true,
+          "command": "bun test tests/budget.test.ts tests/ledger.test.ts tests/server.test.ts",
+          "status": "pending",
+          "summary": "Budget and usage ledger behavior must remain fail-closed for hard limits."
+        },
+        {
+          "id": "cors-denial",
+          "kind": "auth",
+          "required": true,
+          "command": "bun test tests/server.test.ts",
+          "status": "pending",
+          "summary": "Browser CORS is allowlisted; unknown origins are denied."
+        },
+        {
+          "id": "package-bin-smoke",
+          "kind": "smoke",
+          "required": true,
+          "command": "bun run build && bun dist/serve.js --version",
+          "status": "pending",
+          "summary": "The installed package exposes gateway-serve without starting a long-running process for --version."
+        }
+      ]
+    }
+  ],
+  "storage": {
+    "mode": "cloud",
+    "envPrefix": "HASNA_GATEWAY_",
+    "aliasEnvPrefix": "GATEWAY_",
+    "databaseUrlSecretRef": "hasna/oss/gateway/database-url"
+  }
+}
