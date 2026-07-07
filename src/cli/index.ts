@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { lstat, unlink } from "node:fs/promises";
 import { loadGatewayConfig, validateConfig, validateRuntimeSecrets } from "../config";
 import { getBudgetStatuses } from "../budget";
 import type { GatewayConfigInput } from "../types";
@@ -62,6 +63,10 @@ function optionalFlagNumber(flags: Record<string, string | boolean>, key: string
   return parsed;
 }
 
+function hasBareFlag(flags: Record<string, string | boolean>, key: string): boolean {
+  return flags[key] === true;
+}
+
 async function readRawConfig(path: string): Promise<GatewayConfigInput> {
   return JSON.parse(await Bun.file(path).text()) as GatewayConfigInput;
 }
@@ -72,6 +77,25 @@ async function writeRawConfig(path: string, config: GatewayConfigInput): Promise
     throw new Error(result.errors.join(" "));
   }
   await Bun.write(path, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+async function removeFileIfPresent(path: string, label: string): Promise<boolean> {
+  let stats;
+  try {
+    stats = await lstat(path);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+
+  if (stats.isDirectory()) {
+    throw new Error(`Refusing to remove ${label} because it is a directory: ${path}`);
+  }
+
+  await unlink(path);
+  return true;
 }
 
 function printJsonOrText(value: unknown, flags: Record<string, string | boolean>, textValue: string): void {
@@ -91,6 +115,8 @@ Usage:
   gateway budget-list --config gateway.config.json [--json]
   gateway budget-remaining --config gateway.config.json [--id daily] [--json]
   gateway budget-reset --config gateway.config.json --id daily
+  gateway uninstall --config gateway.config.json --yes
+  gateway remove --config gateway.config.json --all --yes
   gateway help
 `;
 }
@@ -175,6 +201,41 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     raw.budgets = budgets;
     await writeRawConfig(configPath, raw);
     printJsonOrText({ budget }, parsed.flags, `Budget ${id} reset.`);
+    return;
+  }
+
+  if (parsed.command === "uninstall" || parsed.command === "remove") {
+    if (parsed.command === "remove" && !hasBareFlag(parsed.flags, "all")) {
+      throw new Error("gateway remove requires --all.");
+    }
+    if (!hasBareFlag(parsed.flags, "yes")) {
+      console.error("Refusing to purge local gateway state without --yes.");
+      process.exitCode = 1;
+      return;
+    }
+
+    const raw = await readRawConfig(configPath);
+    const ledgerPath = raw.storage?.usageLedgerPath;
+    const removedLedger = ledgerPath ? await removeFileIfPresent(ledgerPath, "usage ledger") : false;
+    const removedConfig = await removeFileIfPresent(configPath, "config");
+
+    printJsonOrText(
+      {
+        configPath,
+        usageLedgerPath: ledgerPath,
+        removed: {
+          config: removedConfig,
+          usageLedger: removedLedger,
+        },
+      },
+      parsed.flags,
+      [
+        `${removedConfig ? "Removed" : "No config file found at"} ${configPath}.`,
+        ledgerPath
+          ? `${removedLedger ? "Removed" : "No usage ledger found at"} ${ledgerPath}.`
+          : "No usage ledger configured.",
+      ].join("\n"),
+    );
     return;
   }
 
