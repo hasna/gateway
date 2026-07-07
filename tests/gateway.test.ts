@@ -140,6 +140,16 @@ describe("chat completion lifecycle", () => {
 
   test("completes an Anthropic-backed alias and normalizes usage", async () => {
     const calls: string[] = [];
+    const config = anthropicTestConfig();
+    config.budgets = [
+      {
+        id: "anthropic-per-request",
+        window: "per-request",
+        mode: "soft",
+        scope: { modelAlias: "anthropic-coding" },
+        maxTotalTokens: 40,
+      },
+    ];
     const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       calls.push(String(url));
       expect((init?.headers as Record<string, string>)["x-api-key"]).toBe("anthropic");
@@ -161,13 +171,14 @@ describe("chat completion lifecycle", () => {
           input_tokens: 11,
           output_tokens: 4,
           cache_read_input_tokens: 3,
+          cache_creation_input_tokens: 6,
         },
       });
     };
 
     const result = await createChatCompletion(
       {
-        config: anthropicTestConfig(),
+        config,
         env: {
           GATEWAY_API_KEY: "gateway",
           ANTHROPIC_API_KEY: "anthropic",
@@ -194,14 +205,26 @@ describe("chat completion lifecycle", () => {
       },
     ]);
     expect(result.body.usage).toEqual({
-      prompt_tokens: 11,
+      prompt_tokens: 20,
       completion_tokens: 4,
-      total_tokens: 15,
+      total_tokens: 24,
       prompt_tokens_details: {
         cached_tokens: 3,
       },
     });
-    expect((result.body.gateway as Record<string, unknown>).provider).toBe("anthropic");
+    const gateway = result.body.gateway as Record<string, unknown>;
+    expect(gateway.provider).toBe("anthropic");
+    expect(gateway.estimated_cost_usd).toBe(0.000111);
+    expect(gateway.budgets).toEqual([
+      {
+        id: "anthropic-per-request",
+        mode: "soft",
+        remaining: {
+          totalTokens: 16,
+        },
+        warnings: [],
+      },
+    ]);
   });
 
   test("routes a Gemini alias through the Google adapter and normalizes usage", async () => {
