@@ -1,0 +1,10 @@
+{
+  "schema": "hasna.cost_estimate.v1",
+  "id": "gateway_cost_invalid_fixture",
+  "createdAt": "2026-07-06T00:00:00.000Z",
+  "currency": "USD",
+  "amountMicros": -1,
+  "promptTokens": 1000,
+  "completionTokens": 500,
+  "totalTokens": 1400
+}

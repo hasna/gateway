@@ -2,7 +2,10 @@
 import { lstat, unlink } from "node:fs/promises";
 import { loadGatewayConfig, validateConfig, validateRuntimeSecrets } from "../config";
 import { getBudgetStatuses } from "../budget";
-import type { GatewayConfigInput } from "../types";
+import { GatewayHttpError } from "../errors";
+import { toCapabilityCards, toCostEstimate, toDecisionEnvelope } from "../lib/contracts";
+import { resolveRoute } from "../router";
+import type { GatewayConfigInput, GatewayRouteDecision, OpenAIChatCompletionRequest } from "../types";
 import { runAvailableProviderSmokeChecks, runLiveSmokeCheck } from "../smoke";
 import { startGatewayServer } from "../server";
 import { gatewayVersion } from "../version";
@@ -103,6 +106,10 @@ function printJsonOrText(value: unknown, flags: Record<string, string | boolean>
   else console.log(textValue);
 }
 
+function contractJson(flags: Record<string, string | boolean>): boolean {
+  return Boolean(flags.json && flags.contract);
+}
+
 function help(): string {
   return `Hasna Gateway ${gatewayVersion}
 
@@ -113,8 +120,10 @@ Usage:
   gateway smoke --config gateway.config.json --all
   gateway budget-add --config gateway.config.json --id daily --window daily [--tenant acme] [--model coding] [--max-usd 1] [--max-total-tokens 100000]
   gateway budget-list --config gateway.config.json [--json]
-  gateway budget-remaining --config gateway.config.json [--id daily] [--json]
+  gateway budget-remaining --config gateway.config.json [--id daily] [--json] [--contract]
   gateway budget-reset --config gateway.config.json --id daily
+  gateway route --config gateway.config.json --model coding [--json] [--contract]
+  gateway routes --config gateway.config.json [--json] [--contract]
   gateway uninstall --config gateway.config.json --yes
   gateway remove --config gateway.config.json --all --yes
   gateway help
@@ -180,6 +189,11 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       },
       { budgetId: optionalFlagString(parsed.flags, "id") },
     );
+    if (contractJson(parsed.flags)) {
+      const createdAt = new Date().toISOString();
+      console.log(JSON.stringify(statuses.map((status) => toCostEstimate(status, { createdAt })), null, 2));
+      return;
+    }
     printJsonOrText(
       statuses,
       parsed.flags,
@@ -187,6 +201,54 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         .map((status) => `${status.budget.id}: ${JSON.stringify(status.remaining)}`)
         .join("\n") || "No matching budgets.",
     );
+    return;
+  }
+
+  if (parsed.command === "route") {
+    const config = await loadGatewayConfig(configPath);
+    const model = flagString(parsed.flags, "model", "");
+    if (!model) throw new Error("--model is required.");
+    const request: OpenAIChatCompletionRequest = {
+      model,
+      messages: [{ role: "user", content: "" }],
+      ...(parsed.flags.stream ? { stream: true } : {}),
+    };
+    try {
+      const result = resolveRoute({ config }, request);
+      if (contractJson(parsed.flags)) {
+        console.log(JSON.stringify(toDecisionEnvelope(result.decision, { createdAt: new Date().toISOString() }), null, 2));
+        return;
+      }
+      printJsonOrText(result.decision, parsed.flags, result.decision.selected ?? result.decision.reason);
+      return;
+    } catch (error) {
+      if (error instanceof GatewayHttpError && error.raw) {
+        if (contractJson(parsed.flags)) {
+          console.log(JSON.stringify(toDecisionEnvelope(error.raw as GatewayRouteDecision, { createdAt: new Date().toISOString() }), null, 2));
+          process.exitCode = 1;
+          return;
+        }
+        printJsonOrText(error.raw, parsed.flags, error.message);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+  }
+
+  if (parsed.command === "routes") {
+    const config = await loadGatewayConfig(configPath);
+    const routes = config.routes.map((route) => ({
+      id: route.id,
+      mode: route.mode,
+      modelAliases: route.modelAliases ?? [],
+      fallbackModelIds: route.fallbackModelIds ?? [],
+    }));
+    if (contractJson(parsed.flags)) {
+      console.log(JSON.stringify(toCapabilityCards(config, { createdAt: new Date().toISOString() }), null, 2));
+      return;
+    }
+    printJsonOrText(routes, parsed.flags, routes.map((route) => route.id).join("\n") || "No routes configured.");
     return;
   }
 

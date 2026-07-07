@@ -1,0 +1,24 @@
+{
+  "schema": "hasna.cost_estimate.v1",
+  "id": "gateway_cost_fixture",
+  "createdAt": "2026-07-06T00:00:00.000Z",
+  "currency": "USD",
+  "amountMicros": 2500,
+  "provider": "placeholder-provider",
+  "model": "placeholder-provider/placeholder-model",
+  "promptTokens": 1000,
+  "completionTokens": 500,
+  "totalTokens": 1500,
+  "basis": "estimated",
+  "resourceRefs": [
+    {
+      "kind": "model",
+      "id": "gateway_model_placeholder",
+      "externalId": "placeholder-provider/placeholder-model",
+      "sourcePackage": "@hasna/gateway"
+    }
+  ],
+  "metadata": {
+    "sourcePackage": "@hasna/gateway"
+  }
+}

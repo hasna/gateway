@@ -1,0 +1,35 @@
+{
+  "schema": "hasna.decision_envelope.v1",
+  "id": "gateway_decision_fixture",
+  "createdAt": "2026-07-06T00:00:00.000Z",
+  "decisionType": "model_route",
+  "status": "selected",
+  "actor": {
+    "kind": "service",
+    "id": "hasna_gateway",
+    "name": "Hasna Gateway",
+    "provider": "@hasna/gateway"
+  },
+  "selected": [
+    {
+      "kind": "model",
+      "id": "gateway_model_placeholder",
+      "externalId": "placeholder-provider/placeholder-model",
+      "sourcePackage": "@hasna/gateway"
+    }
+  ],
+  "skipped": [
+    {
+      "kind": "model",
+      "id": "gateway_model_placeholder_fallback",
+      "externalId": "placeholder-provider/placeholder-fallback",
+      "sourcePackage": "@hasna/gateway"
+    }
+  ],
+  "reason": "Selected the first eligible placeholder model.",
+  "obligations": ["record-cost"],
+  "metadata": {
+    "sourcePackage": "@hasna/gateway",
+    "mode": "fallback"
+  }
+}
