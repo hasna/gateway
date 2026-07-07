@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { buildServer } from "../src/mcp/index";
+import { buildServer, GATEWAY_MCP_TOOLS, parseMcpArgs } from "../src/mcp/index";
+import { gatewayVersion } from "../src/version";
 import { testConfig } from "./helpers";
 
 const tempDirs: string[] = [];
@@ -51,13 +52,55 @@ afterEach(() => {
 });
 
 describe("gateway MCP server", () => {
-  test("registers expected tools and validates config", async () => {
+  test("asserts the startup contract and validates config", async () => {
     const configPath = join(tempDir(), "gateway.config.json");
     await writeConfig(configPath);
     const { client, close } = await connectClient(configPath);
     try {
+      expect(client.getServerVersion()).toEqual({ name: "gateway", version: gatewayVersion });
+
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toContain("gateway_validate_config");
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual([...GATEWAY_MCP_TOOLS].sort());
+      const budgetAddSchema = tools.tools.find((tool) => tool.name === "gateway_budget_add")?.inputSchema as any;
+      expect(budgetAddSchema).toMatchObject({
+        type: "object",
+        required: ["id"],
+        additionalProperties: false,
+        properties: {
+          id: { type: "string", minLength: 1 },
+          window: { type: "string", enum: ["per-request", "daily", "monthly", "lifetime"] },
+          max_total_tokens: { type: "integer", minimum: 0 },
+          confirm_write: { type: "boolean" },
+        },
+      });
+      const routeSchema = tools.tools.find((tool) => tool.name === "gateway_explain_route")?.inputSchema as any;
+      expect(routeSchema).toMatchObject({
+        type: "object",
+        required: ["request"],
+        additionalProperties: false,
+        properties: {
+          request: {
+            type: "object",
+            required: ["model"],
+            properties: {
+              model: { type: "string", minLength: 1 },
+            },
+          },
+        },
+      });
+
+      const health = parseToolText(await client.callTool({ name: "gateway_health", arguments: {} }));
+      expect(health).toMatchObject({
+        ok: true,
+        name: "gateway-mcp",
+        version: gatewayVersion,
+        defaultConfigPath: configPath,
+      });
+      expect(health.tools).toEqual([...GATEWAY_MCP_TOOLS]);
+      expect(parseMcpArgs(["--config", configPath, "--allow-config-path-overrides"])).toEqual({
+        configPath,
+        allowConfigPathOverrides: true,
+      });
 
       const result = parseToolText(await client.callTool({ name: "gateway_validate_config", arguments: {} }));
       expect(result.ok).toBe(true);
@@ -208,6 +251,90 @@ describe("gateway MCP server", () => {
       expect(payload.error.message).toContain("config_path overrides are disabled");
     } finally {
       await close();
+    }
+  });
+
+  test("returns structured redacted errors for invalid tool inputs", async () => {
+    const previousSecret = process.env.MCP_REVIEW_SECRET;
+    const previousProviderKey = process.env.OPENAI_API_KEY;
+    const fakeProviderKey = ["sk", "review-provider-key-1234567890"].join("-");
+    process.env.MCP_REVIEW_SECRET = "review-secret-value";
+    process.env.OPENAI_API_KEY = fakeProviderKey;
+    const configPath = join(tempDir(), "gateway.config.json");
+    await writeConfig(configPath);
+
+    const { client, close } = await connectClient(configPath);
+    try {
+      const budgetResult = await client.callTool({
+        name: "gateway_budget_add",
+        arguments: {
+          id: "",
+          max_total_tokens: "not-a-number",
+          [process.env.MCP_REVIEW_SECRET]: true,
+          [process.env.OPENAI_API_KEY]: true,
+        },
+      });
+      const budgetPayload = parseToolText(budgetResult);
+      const budgetText = JSON.stringify(budgetPayload);
+      expect(budgetResult.isError).toBe(true);
+      expect(budgetPayload.error).toMatchObject({
+        type: "gateway_mcp_validation_error",
+        code: "invalid_tool_input",
+        tool: "gateway_budget_add",
+      });
+      expect(budgetPayload.error.issues.map((issue: { path: string }) => issue.path)).toContain("id");
+      expect(budgetPayload.error.issues.map((issue: { path: string }) => issue.path)).toContain("max_total_tokens");
+      expect(budgetText).not.toContain("review-secret-value");
+      expect(budgetText).not.toContain(fakeProviderKey);
+
+      const writeConfirmResult = await client.callTool({
+        name: "gateway_budget_add",
+        arguments: { id: "team-daily", max_total_tokens: 100 },
+      });
+      const writeConfirmPayload = parseToolText(writeConfirmResult);
+      expect(writeConfirmResult.isError).toBe(true);
+      expect(writeConfirmPayload.error).toMatchObject({
+        type: "gateway_mcp_validation_error",
+        code: "invalid_tool_input",
+        tool: "gateway_budget_add",
+      });
+      expect(writeConfirmPayload.error.issues.map((issue: { path: string }) => issue.path)).toContain("confirm_write");
+
+      const routeResult = await client.callTool({
+        name: "gateway_explain_route",
+        arguments: { request: { messages: [{ role: "user", content: "hello" }] } },
+      });
+      const routePayload = parseToolText(routeResult);
+      expect(routeResult.isError).toBe(true);
+      expect(routePayload.error).toMatchObject({
+        type: "gateway_mcp_validation_error",
+        code: "invalid_tool_input",
+        tool: "gateway_explain_route",
+      });
+      expect(routePayload.error.issues.map((issue: { path: string }) => issue.path)).toContain("request.model");
+
+      for (const toolName of GATEWAY_MCP_TOOLS) {
+        const result = await client.callTool({
+          name: toolName,
+          arguments: { [process.env.MCP_REVIEW_SECRET]: process.env.OPENAI_API_KEY },
+        });
+        const payload = parseToolText(result);
+        const text = JSON.stringify(payload);
+        expect(result.isError).toBe(true);
+        expect(payload.error).toMatchObject({
+          type: "gateway_mcp_validation_error",
+          code: "invalid_tool_input",
+          tool: toolName,
+        });
+        expect(text).not.toContain("review-secret-value");
+        expect(text).not.toContain(fakeProviderKey);
+      }
+    } finally {
+      await close();
+      if (previousSecret === undefined) delete process.env.MCP_REVIEW_SECRET;
+      else process.env.MCP_REVIEW_SECRET = previousSecret;
+      if (previousProviderKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousProviderKey;
     }
   });
 
