@@ -104,6 +104,19 @@ describe("config validation", () => {
     }
   });
 
+  test("rejects invalid CORS origins", () => {
+    const config = testConfig();
+    config.server.corsAllowedOrigins = ["*", "ftp://example.test"];
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const errors = result.errors.join("\n");
+      expect(errors).toContain("server.corsAllowedOrigins.0");
+      expect(errors).toContain("server.corsAllowedOrigins.1");
+    }
+  });
+
   test("rejects invalid per-gateway-key rate limit values", () => {
     const result = validateConfig({
       server: {

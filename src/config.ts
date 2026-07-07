@@ -40,6 +40,7 @@ const serverSchema = z
     maxRequestBodyBytes: z.number().min(1).optional(),
     includeGatewayMetadata: z.boolean().optional(),
     maxFallbackAttempts: z.number().int().min(1).optional(),
+    corsAllowedOrigins: z.array(z.string().min(1)).optional(),
     rateLimits: z
       .object({
         perGatewayKey: z
@@ -170,6 +171,7 @@ const defaultServer: GatewayServerConfig = {
   maxRequestBodyBytes: 1_000_000,
   includeGatewayMetadata: true,
   maxFallbackAttempts: 3,
+  corsAllowedOrigins: ["http://127.0.0.1:8787", "http://localhost:8787"],
 };
 
 const defaultAuth: GatewayAuthConfig = {
@@ -412,6 +414,16 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
   assertNumber(config.server.requestTimeoutMs, "server.requestTimeoutMs", errors, 1);
   assertNumber(config.server.maxRequestBodyBytes, "server.maxRequestBodyBytes", errors, 1);
   assertNumber(config.server.maxFallbackAttempts, "server.maxFallbackAttempts", errors, 1);
+  for (const [index, origin] of config.server.corsAllowedOrigins.entries()) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        errors.push(`server.corsAllowedOrigins.${index} must use http or https.`);
+      }
+    } catch {
+      errors.push(`server.corsAllowedOrigins.${index} must be a valid origin URL.`);
+    }
+  }
   assertString(config.auth.apiKeyEnv, "auth.apiKeyEnv", errors);
   assertCloudStorage(config, errors);
 

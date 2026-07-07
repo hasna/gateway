@@ -46,6 +46,24 @@ type LedgerTotals = {
 
 const DEFAULT_CONFIG_PATH = "gateway.config.json";
 const SECRET_ENV_NAME_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL)/i;
+const MCP_VALIDATION_ERROR_TYPE = "gateway_mcp_validation_error";
+const MCP_VALIDATION_ERROR_CODE = "invalid_tool_input";
+const MCP_INTERNAL_ERROR_TYPE = "gateway_mcp_error";
+const MCP_INTERNAL_ERROR_CODE = "tool_failed";
+
+export const GATEWAY_MCP_TOOLS = [
+  "gateway_health",
+  "gateway_validate_config",
+  "gateway_inspect_config",
+  "gateway_explain_route",
+  "gateway_budget_list",
+  "gateway_budget_remaining",
+  "gateway_budget_add",
+  "gateway_budget_reset",
+  "gateway_usage_summary",
+] as const;
+
+type GatewayMcpToolName = (typeof GATEWAY_MCP_TOOLS)[number];
 
 const configPathSchema = z
   .string()
@@ -76,10 +94,125 @@ const routeRequestSchema = z
 const budgetWindowSchema = z.enum(["per-request", "daily", "monthly", "lifetime"]);
 const budgetModeSchema = z.enum(["hard", "soft"]);
 
-type GatewayMcpServerOptions = {
+export type GatewayMcpServerOptions = {
   defaultConfigPath?: string;
   allowConfigPathOverrides?: boolean;
 };
+
+const healthToolInputSchema = z.object({}).strict();
+
+const validateConfigToolInputSchema = z
+  .object({
+    config_path: configPathSchema,
+    interpolate_env: z.boolean().default(true).describe("Resolve ${ENV_VAR} placeholders before validation."),
+  })
+  .strict();
+
+const inspectConfigToolInputSchema = z
+  .object({
+    config_path: configPathSchema,
+  })
+  .strict();
+
+const explainRouteToolInputSchema = z
+  .object({
+    config_path: configPathSchema,
+    request: routeRequestSchema,
+    env_present: z
+      .array(z.string().min(1))
+      .optional()
+      .describe("Environment variable names to treat as present for routing simulation."),
+    use_process_env: z
+      .boolean()
+      .default(true)
+      .describe("Use real environment variable presence while never returning secret values."),
+  })
+  .strict();
+
+const budgetListToolInputSchema = inspectConfigToolInputSchema;
+
+const budgetRemainingToolInputSchema = z
+  .object({
+    config_path: configPathSchema,
+    id: z.string().min(1).optional(),
+    tenant: z.string().min(1).optional(),
+    model: z.string().min(1).optional(),
+    gateway_key_fingerprint: z.string().min(1).optional(),
+  })
+  .strict();
+
+const budgetAddToolInputSchema = z
+  .object({
+    config_path: configPathSchema,
+    id: z.string().min(1),
+    window: budgetWindowSchema.default("lifetime"),
+    mode: budgetModeSchema.default("hard"),
+    tenant: z.string().min(1).optional(),
+    model: z.string().min(1).optional(),
+    gateway_key_fingerprint: z.string().min(1).optional(),
+    max_usd: z.number().nonnegative().optional(),
+    max_input_tokens: z.number().int().nonnegative().optional(),
+    max_output_tokens: z.number().int().nonnegative().optional(),
+    max_total_tokens: z.number().int().nonnegative().optional(),
+    warning_threshold: z.number().min(0).max(1).optional(),
+    replace: z.boolean().default(false).describe("Required when replacing an existing budget id."),
+    dry_run: z.boolean().default(false).describe("Validate and preview the write without modifying the config file."),
+    confirm_write: z.boolean().default(false).describe("Must be true for non-dry-run writes."),
+  })
+  .strict();
+
+const budgetResetToolInputSchema = z
+  .object({
+    config_path: configPathSchema,
+    id: z.string().min(1),
+    reset_at: z.string().datetime().optional(),
+    dry_run: z.boolean().default(false).describe("Validate and preview the reset without modifying the config file."),
+    confirm_write: z.boolean().default(false).describe("Must be true for non-dry-run writes."),
+  })
+  .strict();
+
+const budgetAddValidationSchema = budgetAddToolInputSchema.superRefine((input, context) => {
+  if (!input.dry_run && !input.confirm_write) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["confirm_write"],
+      message: "gateway_budget_add requires confirm_write=true unless dry_run=true.",
+    });
+  }
+});
+
+const budgetResetValidationSchema = budgetResetToolInputSchema.superRefine((input, context) => {
+  if (!input.dry_run && !input.confirm_write) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["confirm_write"],
+      message: "gateway_budget_reset requires confirm_write=true unless dry_run=true.",
+    });
+  }
+});
+
+const usageSummaryToolInputSchema = z
+  .object({
+    config_path: configPathSchema,
+    limit: z.number().int().min(0).max(100).default(20),
+  })
+  .strict();
+
+class McpToolInputValidationError extends Error {
+  readonly toolName: GatewayMcpToolName;
+  readonly issues: Array<{ path: string; code: string; message: string }>;
+
+  constructor(toolName: GatewayMcpToolName, error: z.ZodError) {
+    super(`Invalid arguments for tool ${toolName}.`);
+    this.name = "McpToolInputValidationError";
+    this.toolName = toolName;
+    this.issues = error.issues.map((issue) => ({
+      path: issue.path.length ? redactMcpString(issue.path.map(String).join(".")) : "(root)",
+      code: issue.code,
+      message: redactMcpString(issue.message),
+    }));
+  }
+}
 
 function jsonResult(value: unknown): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
@@ -87,7 +220,18 @@ function jsonResult(value: unknown): ToolResult {
 
 function errorResult(error: unknown): ToolResult {
   const payload =
-    error instanceof GatewayHttpError
+    error instanceof McpToolInputValidationError
+      ? {
+          ok: false,
+          error: {
+            message: redactMcpString(error.message),
+            type: MCP_VALIDATION_ERROR_TYPE,
+            code: MCP_VALIDATION_ERROR_CODE,
+            tool: safeString(error.toolName),
+            issues: redactMcpValue(error.issues),
+          },
+        }
+      : error instanceof GatewayHttpError
       ? {
           ok: false,
           error: {
@@ -103,6 +247,8 @@ function errorResult(error: unknown): ToolResult {
           ok: false,
           error: {
             message: redactMcpString(error instanceof Error ? error.message : String(error)),
+            type: MCP_INTERNAL_ERROR_TYPE,
+            code: MCP_INTERNAL_ERROR_CODE,
           },
         };
   return { ...jsonResult(payload), isError: true };
@@ -114,6 +260,26 @@ async function safeTool(fn: () => Promise<unknown> | unknown): Promise<ToolResul
   } catch (error) {
     return errorResult(error);
   }
+}
+
+function parseToolInput<Input>(
+  toolName: GatewayMcpToolName,
+  schema: z.ZodType<Input>,
+  input: unknown,
+): Input {
+  const parsed = schema.safeParse(input ?? {});
+  if (!parsed.success) {
+    throw new McpToolInputValidationError(toolName, parsed.error);
+  }
+  return parsed.data;
+}
+
+function useStructuredToolInputValidation(server: McpServer): void {
+  // The MCP SDK's own input validation returns plain text tool errors.
+  // Keep strict registered schemas for tools/list, but let handlers return
+  // structured, redacted validation payloads for tool calls.
+  (server as unknown as { validateToolInput: (_tool: unknown, args: unknown) => Promise<unknown> }).validateToolInput =
+    async (_tool, args) => args ?? {};
 }
 
 function resolveConfigPath(path: string | undefined, defaultConfigPath: string, allowOverrides: boolean): string {
@@ -417,7 +583,7 @@ async function summarizeUsageLedger(config: GatewayConfig, limit: number): Promi
   };
 }
 
-function parseMcpArgs(argv: string[]): { configPath: string; allowConfigPathOverrides: boolean } {
+export function parseMcpArgs(argv: string[]): { configPath: string; allowConfigPathOverrides: boolean } {
   const configIndex = argv.indexOf("--config");
   const allowConfigPathOverrides =
     argv.includes("--allow-config-path-overrides") || process.env.GATEWAY_MCP_ALLOW_CONFIG_PATH_OVERRIDES === "1";
@@ -434,39 +600,39 @@ export function buildServer(options: GatewayMcpServerOptions = {}): McpServer {
     name: "gateway",
     version: gatewayVersion,
   });
+  useStructuredToolInputValidation(server);
 
-  server.tool("gateway_health", "Return gateway MCP server health and default config path.", {}, async () =>
+  server.registerTool("gateway_health", {
+    description: "Return gateway MCP server health and default config path.",
+    inputSchema: healthToolInputSchema,
+  }, async (input) =>
     safeTool(() => ({
+      ...parseToolInput("gateway_health", healthToolInputSchema, input),
       ok: true,
       name: "gateway-mcp",
       version: gatewayVersion,
       defaultConfigPath: safeString(defaultConfigPath),
-      tools: [
-        "gateway_validate_config",
-        "gateway_inspect_config",
-        "gateway_explain_route",
-        "gateway_budget_list",
-        "gateway_budget_remaining",
-        "gateway_budget_add",
-        "gateway_budget_reset",
-        "gateway_usage_summary",
-      ],
+      tools: [...GATEWAY_MCP_TOOLS],
     })),
   );
 
-  server.tool(
+  server.registerTool(
     "gateway_validate_config",
-    "Validate a gateway config file without starting the HTTP gateway or contacting providers.",
     {
-      config_path: configPathSchema,
-      interpolate_env: z.boolean().default(true).describe("Resolve ${ENV_VAR} placeholders before validation."),
+      description: "Validate a gateway config file without starting the HTTP gateway or contacting providers.",
+      inputSchema: validateConfigToolInputSchema,
     },
-    async ({ config_path, interpolate_env }) =>
+    async (input) =>
       safeTool(async () => {
+        const { config_path, interpolate_env } = parseToolInput(
+          "gateway_validate_config",
+          validateConfigToolInputSchema,
+          input,
+        );
         const path = resolveConfigPath(config_path, defaultConfigPath, allowConfigPathOverrides);
         const raw = await readConfigInput(path);
-        const input = interpolate_env ? (interpolateEnvPlaceholders(raw) as GatewayConfigInput) : raw;
-        const result = validateConfig(input);
+        const configInput = interpolate_env ? (interpolateEnvPlaceholders(raw) as GatewayConfigInput) : raw;
+        const result = validateConfig(configInput);
         if (!result.ok) {
           return {
             path: safeString(path),
@@ -489,12 +655,16 @@ export function buildServer(options: GatewayMcpServerOptions = {}): McpServer {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "gateway_inspect_config",
-    "Inspect configured providers, models, routes, budgets, presets, and runtime key presence without returning secret values.",
-    { config_path: configPathSchema },
-    async ({ config_path }) =>
+    {
+      description:
+        "Inspect configured providers, models, routes, budgets, presets, and runtime key presence without returning secret values.",
+      inputSchema: inspectConfigToolInputSchema,
+    },
+    async (input) =>
       safeTool(async () => {
+        const { config_path } = parseToolInput("gateway_inspect_config", inspectConfigToolInputSchema, input);
         const path = resolveConfigPath(config_path, defaultConfigPath, allowConfigPathOverrides);
         const config = await loadGatewayConfig(path);
         return {
@@ -504,23 +674,19 @@ export function buildServer(options: GatewayMcpServerOptions = {}): McpServer {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "gateway_explain_route",
-    "Dry-run gateway route selection for a chat request without sending provider traffic.",
     {
-      config_path: configPathSchema,
-      request: routeRequestSchema,
-      env_present: z
-        .array(z.string().min(1))
-        .optional()
-        .describe("Environment variable names to treat as present for routing simulation."),
-      use_process_env: z
-        .boolean()
-        .default(true)
-        .describe("Use real environment variable presence while never returning secret values."),
+      description: "Dry-run gateway route selection for a chat request without sending provider traffic.",
+      inputSchema: explainRouteToolInputSchema,
     },
-    async ({ config_path, request, env_present, use_process_env }) =>
+    async (input) =>
       safeTool(async () => {
+        const { config_path, request, env_present, use_process_env } = parseToolInput(
+          "gateway_explain_route",
+          explainRouteToolInputSchema,
+          input,
+        );
         const path = resolveConfigPath(config_path, defaultConfigPath, allowConfigPathOverrides);
         const config = await loadGatewayConfig(path);
         return {
@@ -537,30 +703,34 @@ export function buildServer(options: GatewayMcpServerOptions = {}): McpServer {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "gateway_budget_list",
-    "List configured budget definitions.",
-    { config_path: configPathSchema },
-    async ({ config_path }) =>
+    {
+      description: "List configured budget definitions.",
+      inputSchema: budgetListToolInputSchema,
+    },
+    async (input) =>
       safeTool(async () => {
+        const { config_path } = parseToolInput("gateway_budget_list", budgetListToolInputSchema, input);
         const path = resolveConfigPath(config_path, defaultConfigPath, allowConfigPathOverrides);
         const config = await loadGatewayConfig(path);
         return { path: safeString(path), budgets: config.budgets.map(safeBudgetSummary) };
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "gateway_budget_remaining",
-    "Calculate remaining budget for an optional tenant/model/gateway-key context using the local usage ledger.",
     {
-      config_path: configPathSchema,
-      id: z.string().min(1).optional(),
-      tenant: z.string().min(1).optional(),
-      model: z.string().min(1).optional(),
-      gateway_key_fingerprint: z.string().min(1).optional(),
+      description: "Calculate remaining budget for an optional tenant/model/gateway-key context using the local usage ledger.",
+      inputSchema: budgetRemainingToolInputSchema,
     },
-    async ({ config_path, id, tenant, model, gateway_key_fingerprint }) =>
+    async (input) =>
       safeTool(async () => {
+        const { config_path, id, tenant, model, gateway_key_fingerprint } = parseToolInput(
+          "gateway_budget_remaining",
+          budgetRemainingToolInputSchema,
+          input,
+        );
         const path = resolveConfigPath(config_path, defaultConfigPath, allowConfigPathOverrides);
         const config = await loadGatewayConfig(path);
         const statuses = await getBudgetStatuses(
@@ -572,58 +742,43 @@ export function buildServer(options: GatewayMcpServerOptions = {}): McpServer {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "gateway_budget_add",
-    "Add or replace a budget definition in a gateway config file.",
     {
-      config_path: configPathSchema,
-      id: z.string().min(1),
-      window: budgetWindowSchema.default("lifetime"),
-      mode: budgetModeSchema.default("hard"),
-      tenant: z.string().min(1).optional(),
-      model: z.string().min(1).optional(),
-      gateway_key_fingerprint: z.string().min(1).optional(),
-      max_usd: z.number().nonnegative().optional(),
-      max_input_tokens: z.number().int().nonnegative().optional(),
-      max_output_tokens: z.number().int().nonnegative().optional(),
-      max_total_tokens: z.number().int().nonnegative().optional(),
-      warning_threshold: z.number().min(0).max(1).optional(),
-      replace: z.boolean().default(false).describe("Required when replacing an existing budget id."),
-      dry_run: z.boolean().default(false).describe("Validate and preview the write without modifying the config file."),
-      confirm_write: z.boolean().default(false).describe("Must be true for non-dry-run writes."),
+      description: "Add or replace a budget definition in a gateway config file.",
+      inputSchema: budgetAddToolInputSchema,
     },
     async (input) =>
       safeTool(async () => {
-        const path = resolveConfigPath(input.config_path, defaultConfigPath, allowConfigPathOverrides);
-        if (!input.dry_run && !input.confirm_write) {
-          throw new Error("gateway_budget_add requires confirm_write=true unless dry_run=true.");
-        }
+        const parsedInput = parseToolInput("gateway_budget_add", budgetAddValidationSchema, input);
+        const path = resolveConfigPath(parsedInput.config_path, defaultConfigPath, allowConfigPathOverrides);
+        const dryRun = parsedInput.dry_run ?? false;
         const raw = await readConfigInput(path);
-        const existing = raw.budgets?.find((item) => item.id === input.id);
-        if (existing && !input.replace) {
-          throw new Error(`Budget '${input.id}' already exists. Pass replace=true to replace it.`);
+        const existing = raw.budgets?.find((item) => item.id === parsedInput.id);
+        if (existing && !parsedInput.replace) {
+          throw new Error(`Budget '${parsedInput.id}' already exists. Pass replace=true to replace it.`);
         }
         const budget: GatewayBudgetConfig = {
-          id: input.id,
-          window: input.window,
-          mode: input.mode,
+          id: parsedInput.id,
+          window: parsedInput.window ?? "lifetime",
+          mode: parsedInput.mode ?? "hard",
           scope: {
-            ...(input.tenant ? { tenant: input.tenant } : {}),
-            ...(input.model ? { modelAlias: input.model } : {}),
-            ...(input.gateway_key_fingerprint ? { gatewayKey: input.gateway_key_fingerprint } : {}),
+            ...(parsedInput.tenant ? { tenant: parsedInput.tenant } : {}),
+            ...(parsedInput.model ? { modelAlias: parsedInput.model } : {}),
+            ...(parsedInput.gateway_key_fingerprint ? { gatewayKey: parsedInput.gateway_key_fingerprint } : {}),
           },
-          ...(input.max_usd === undefined ? {} : { maxUsd: input.max_usd }),
-          ...(input.max_input_tokens === undefined ? {} : { maxInputTokens: input.max_input_tokens }),
-          ...(input.max_output_tokens === undefined ? {} : { maxOutputTokens: input.max_output_tokens }),
-          ...(input.max_total_tokens === undefined ? {} : { maxTotalTokens: input.max_total_tokens }),
-          ...(input.warning_threshold === undefined ? {} : { warningThreshold: input.warning_threshold }),
+          ...(parsedInput.max_usd === undefined ? {} : { maxUsd: parsedInput.max_usd }),
+          ...(parsedInput.max_input_tokens === undefined ? {} : { maxInputTokens: parsedInput.max_input_tokens }),
+          ...(parsedInput.max_output_tokens === undefined ? {} : { maxOutputTokens: parsedInput.max_output_tokens }),
+          ...(parsedInput.max_total_tokens === undefined ? {} : { maxTotalTokens: parsedInput.max_total_tokens }),
+          ...(parsedInput.warning_threshold === undefined ? {} : { warningThreshold: parsedInput.warning_threshold }),
         };
         const normalizedScope = Object.keys(budget.scope ?? {}).length ? budget.scope : undefined;
         const next = {
           ...raw,
           budgets: [...(raw.budgets ?? []).filter((item) => item.id !== budget.id), { ...budget, scope: normalizedScope }],
         };
-        if (input.dry_run) {
+        if (dryRun) {
           const result = validateConfig(next);
           if (!result.ok) throw new Error(result.errors.join(" "));
         } else {
@@ -631,28 +786,27 @@ export function buildServer(options: GatewayMcpServerOptions = {}): McpServer {
         }
         return {
           path: safeString(path),
-          dryRun: input.dry_run,
+          dryRun,
           budget: safeBudgetSummary({ ...budget, scope: normalizedScope }),
         };
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "gateway_budget_reset",
-    "Reset a configured budget window by updating resetAt in the config file.",
     {
-      config_path: configPathSchema,
-      id: z.string().min(1),
-      reset_at: z.string().datetime().optional(),
-      dry_run: z.boolean().default(false).describe("Validate and preview the reset without modifying the config file."),
-      confirm_write: z.boolean().default(false).describe("Must be true for non-dry-run writes."),
+      description: "Reset a configured budget window by updating resetAt in the config file.",
+      inputSchema: budgetResetToolInputSchema,
     },
-    async ({ config_path, id, reset_at, dry_run, confirm_write }) =>
+    async (input) =>
       safeTool(async () => {
+        const { config_path, id, reset_at, dry_run } = parseToolInput(
+          "gateway_budget_reset",
+          budgetResetValidationSchema,
+          input,
+        );
         const path = resolveConfigPath(config_path, defaultConfigPath, allowConfigPathOverrides);
-        if (!dry_run && !confirm_write) {
-          throw new Error("gateway_budget_reset requires confirm_write=true unless dry_run=true.");
-        }
+        const dryRun = dry_run ?? false;
         const raw = await readConfigInput(path);
         const budgets = [...(raw.budgets ?? [])];
         const budget = budgets.find((item) => item.id === id);
@@ -663,30 +817,30 @@ export function buildServer(options: GatewayMcpServerOptions = {}): McpServer {
         }
         budget.resetAt = nextResetAt;
         const next = { ...raw, budgets };
-        if (dry_run) {
+        if (dryRun) {
           const result = validateConfig(next);
           if (!result.ok) throw new Error(result.errors.join(" "));
         } else {
           await writeConfigInput(path, next);
         }
-        return { path: safeString(path), dryRun: dry_run, budget: safeBudgetSummary(budget) };
+        return { path: safeString(path), dryRun, budget: safeBudgetSummary(budget) };
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "gateway_usage_summary",
-    "Summarize the configured local JSONL usage ledger without exposing request or response bodies.",
     {
-      config_path: configPathSchema,
-      limit: z.number().int().min(0).max(100).default(20),
+      description: "Summarize the configured local JSONL usage ledger without exposing request or response bodies.",
+      inputSchema: usageSummaryToolInputSchema,
     },
-    async ({ config_path, limit }) =>
+    async (input) =>
       safeTool(async () => {
+        const { config_path, limit } = parseToolInput("gateway_usage_summary", usageSummaryToolInputSchema, input);
         const path = resolveConfigPath(config_path, defaultConfigPath, allowConfigPathOverrides);
         const config = await loadGatewayConfig(path);
         return {
           configPath: safeString(path),
-          ...(await summarizeUsageLedger(config, limit)),
+          ...(await summarizeUsageLedger(config, limit ?? 20)),
         };
       }),
   );
