@@ -121,7 +121,7 @@ describe("contract adapters", () => {
     expect(decision.selected[0]?.externalId).toBe("openai/gpt-4.1-mini");
 
     const cards = toCapabilityCards(config, { createdAt: "2026-07-06T00:00:00.000Z" });
-    expect(cards).toHaveLength(2);
+    expect(cards).toHaveLength(3);
     expect(cards[0]?.schema).toBe(SCHEMA_IDS.capabilityCard);
     expect(cards[0]?.kind).toBe("model");
     expect(cards[0]?.metadata?.sourcePackage).toBe("@hasna/gateway");

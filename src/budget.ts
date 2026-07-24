@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { GatewayBudgetConfig, GatewayConfig, GatewayUsage, OpenAIChatCompletionRequest } from "./types";
+import type { GatewayBudgetConfig, GatewayConfig, GatewayRoutableRequest, GatewayUsage } from "./types";
 import { GatewayHttpError } from "./errors";
 import { hasUsageLedgerBackend, readBudgetLedgerRecords } from "./storage";
 
@@ -64,7 +64,7 @@ export function fingerprintGatewayKey(value: string | undefined): string | undef
 }
 
 export function budgetContextFromRequest(
-  request: OpenAIChatCompletionRequest,
+  request: GatewayRoutableRequest,
   base: GatewayBudgetContext = {},
 ): GatewayBudgetContext {
   return {

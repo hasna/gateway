@@ -792,12 +792,17 @@ function validateProductionRouteReadiness(config: GatewayConfig, env: Record<str
   const unavailableRouteIds = config.routes
     .filter((route) => {
       const model = route.modelAliases?.[0] ?? route.id;
-      try {
-        resolveRoute({ config, env }, routeProbeRequest(model));
-        return false;
-      } catch {
-        return true;
+      // A route is ready if a keyed provider can satisfy it for either chat or
+      // embeddings, so embeddings-only routes are not probed as chat requests.
+      for (const operation of ["chat", "embeddings"] as const) {
+        try {
+          resolveRoute({ config, env }, routeProbeRequest(model), { operation });
+          return false;
+        } catch {
+          // Try the next operation before marking the route unavailable.
+        }
       }
+      return true;
     })
     .map((route) => route.id);
 

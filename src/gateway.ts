@@ -15,10 +15,12 @@ import { transformOpenAICompatibleStream } from "./streaming";
 import type {
   GatewayRouteCandidate,
   GatewayRouteDecision,
+  GatewayRoutableRequest,
   GatewayRuntimeOptions,
   OpenAIChatCompletionRequest,
+  OpenAIEmbeddingsRequest,
 } from "./types";
-import { estimateCostUsd, normalizeUsage, toOpenAIUsage } from "./usage";
+import { estimateCostUsd, normalizeUsage, toOpenAIEmbeddingsUsage, toOpenAIUsage } from "./usage";
 
 type CompletionResult = {
   body: Record<string, unknown>;
@@ -59,7 +61,7 @@ function metadataFor(
   };
 }
 
-function includeGatewayMetadata(options: GatewayRuntimeOptions, request: OpenAIChatCompletionRequest): boolean {
+function includeGatewayMetadata(options: GatewayRuntimeOptions, request: GatewayRoutableRequest): boolean {
   if (request.gateway?.strict_openai_compatibility) return false;
   return request.gateway?.include_gateway_metadata ?? options.config.server.includeGatewayMetadata;
 }
@@ -267,6 +269,31 @@ async function callProvider(
   });
 }
 
+async function callEmbeddingProvider(
+  options: GatewayRuntimeOptions,
+  request: OpenAIEmbeddingsRequest,
+  candidate: GatewayRouteCandidate,
+): Promise<Response> {
+  const adapter = adapterForProvider(candidate.provider);
+  if (!adapter.embed) {
+    throw new GatewayHttpError({
+      status: 400,
+      type: "gateway_config_error",
+      code: "provider_embeddings_unsupported",
+      message: `Provider ${candidate.provider.id} does not support embeddings requests.`,
+      provider: candidate.provider.id,
+    });
+  }
+  return adapter.embed({
+    provider: candidate.provider,
+    model: candidate.model,
+    request,
+    apiKey: apiKeyFor(candidate, options.env ?? process.env),
+    timeoutMs: options.config.server.requestTimeoutMs,
+    fetchImpl: options.fetchImpl,
+  });
+}
+
 async function openProviderStream(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
@@ -405,6 +432,140 @@ export async function createChatCompletion(
       const result = { body, status: 200, decision: route.decision };
       writeResponseCache(options, cacheKey, result);
       return result;
+    } catch (error) {
+      const gatewayError =
+        error instanceof GatewayHttpError
+          ? error
+          : new GatewayHttpError({
+              status: 502,
+              type: "provider_unavailable",
+              code: "provider_fetch_failed",
+              message: error instanceof Error ? error.message : "Provider fetch failed.",
+              retryable: true,
+              provider: candidate.provider.id,
+            });
+
+      lastError = gatewayError;
+      if (!route.decision.attempts.some((attempt) => attempt.provider === candidate.provider.id && attempt.status === "failed")) {
+        route.decision.attempts.push({
+          provider: candidate.provider.id,
+          model: candidate.model.id,
+          providerModel: candidate.model.providerModel,
+          status: "failed",
+          reason: gatewayError.message,
+          errorType: gatewayError.type,
+          errorCode: gatewayError.code,
+          retryable: gatewayError.retryable,
+          latencyMs: Date.now() - started,
+        });
+      }
+
+      if (gatewayError.retryable) continue;
+      throw gatewayError;
+    }
+  }
+
+  throw new GatewayHttpError({
+    status: lastError?.status ?? 502,
+    type: lastError?.type ?? "gateway_routing_error",
+    code: lastError?.code ?? "all_routes_failed",
+    message: lastError?.message ?? `All route attempts failed for model '${request.model}'.`,
+    retryable: false,
+    raw: route.decision,
+  });
+}
+
+export async function createEmbeddings(
+  options: GatewayRuntimeOptions,
+  request: OpenAIEmbeddingsRequest,
+): Promise<CompletionResult> {
+  const env = options.env ?? process.env;
+  const requestBudgetContext = budgetContextFromRequest(request, options.budgetContext);
+  await assertBudgetPreflight(options.config, requestBudgetContext, { env });
+  const route = resolveRoute(options, request, { operation: "embeddings" });
+  const maxAttempts = Math.min(options.config.server.maxFallbackAttempts, route.candidates.length);
+  let lastError: GatewayHttpError | undefined;
+
+  for (const candidate of route.candidates.slice(0, maxAttempts)) {
+    const started = Date.now();
+    const budgetContext = { ...requestBudgetContext, selectedModel: candidate.model.id };
+    try {
+      await assertBudgetPreflight(options.config, budgetContext, { env });
+      const response = await callEmbeddingProvider(options, request, candidate);
+      const latencyMs = Date.now() - started;
+
+      if (!response.ok) {
+        const error = await providerErrorFromResponse(candidate, response);
+        route.decision.attempts.push({
+          provider: candidate.provider.id,
+          model: candidate.model.id,
+          providerModel: candidate.model.providerModel,
+          status: "failed",
+          reason: error.message,
+          errorType: error.type,
+          errorCode: error.code,
+          retryable: error.retryable,
+          latencyMs,
+        });
+        lastError = error;
+        if (error.retryable) continue;
+        throw error;
+      }
+
+      route.decision.selected = candidate.model.id;
+      route.decision.attempts.push({
+        provider: candidate.provider.id,
+        model: candidate.model.id,
+        providerModel: candidate.model.providerModel,
+        status: "selected",
+        latencyMs,
+      });
+
+      const providerJson = await parseProviderJson(response);
+      const rawUsage = providerJson.usage;
+      if (rawUsage === undefined && options.rateLimit?.requiresStreamingUsage === true) {
+        throw new GatewayHttpError({
+          status: 429,
+          type: "gateway_rate_limit_error",
+          code: "gateway_token_usage_missing",
+          message: "Provider response did not include usage required to enforce a token rate limit.",
+          raw: { context: budgetContext },
+        });
+      }
+      const usage = normalizeUsage(rawUsage);
+      await options.rateLimit?.onUsage?.(usage);
+      const estimatedCostUsd = estimateCostUsd(usage, candidate.model);
+      const budgets = await evaluateBudgetPostflight(
+        options.config,
+        budgetContext,
+        spendFromUsage(usage, estimatedCostUsd),
+        { env },
+      );
+      const body: Record<string, unknown> = {
+        ...providerJson,
+        object: providerJson.object ?? "list",
+        model: candidate.model.id,
+        usage: toOpenAIEmbeddingsUsage(usage),
+      };
+
+      if (includeGatewayMetadata(options, request)) {
+        body.gateway = metadataFor(candidate, route.decision, estimatedCostUsd, budgets);
+      }
+
+      await appendUsageLedgerBestEffort({
+        config: options.config,
+        provider: candidate.provider,
+        model: candidate.model,
+        decision: route.decision,
+        context: budgetContext,
+        usage,
+        estimatedCostUsd,
+        budgets,
+        status: "success",
+      });
+
+      assertBudgetPostflight(budgets);
+      return { body, status: 200, decision: route.decision };
     } catch (error) {
       const gatewayError =
         error instanceof GatewayHttpError

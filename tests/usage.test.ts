@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { estimateCostUsd, normalizeUsage, toOpenAIUsage } from "../src/usage";
+import { estimateCostUsd, normalizeUsage, toOpenAIEmbeddingsUsage, toOpenAIUsage } from "../src/usage";
 
 describe("usage normalization", () => {
   test("normalizes OpenAI usage details", () => {
@@ -99,6 +99,15 @@ describe("usage normalization", () => {
         outputUsdPerMillionTokens: 15,
       }),
     ).toBe(0.000111);
+  });
+
+  test("serializes embeddings usage without chat completion fields", () => {
+    const usage = normalizeUsage({ prompt_tokens: 12, total_tokens: 12 });
+    expect(toOpenAIEmbeddingsUsage(usage)).toEqual({
+      prompt_tokens: 12,
+      total_tokens: 12,
+    });
+    expect(toOpenAIEmbeddingsUsage(usage)).not.toHaveProperty("completion_tokens");
   });
 
   test("returns unknown cost when a used token side has no configured price", () => {

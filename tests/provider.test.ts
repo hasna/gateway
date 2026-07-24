@@ -7,6 +7,7 @@ import {
   toAnthropicMessagesBody,
   toOpenAIChatCompletionResponse,
   toProviderChatBody,
+  toProviderEmbeddingsBody,
 } from "../src/providers";
 import { testConfig } from "./helpers";
 
@@ -217,6 +218,50 @@ describe("OpenAI-compatible provider adapter", () => {
     });
     expect(body.provider_options).toBeUndefined();
     expect((body.providerOptions as Record<string, Record<string, unknown>>).gateway.byok).toBeUndefined();
+  });
+
+  test("strips gateway-only fields from embeddings requests", () => {
+    const body = toProviderEmbeddingsBody(
+      {
+        model: "embeddings",
+        input: ["alpha", "beta"],
+        encoding_format: "float",
+        dimensions: 256,
+        user: "tenant-user",
+        gateway: { routing: "fallback" },
+        provider_options: { ignored: true },
+      },
+      "text-embedding-3-small",
+    );
+
+    expect(body).toEqual({
+      model: "text-embedding-3-small",
+      input: ["alpha", "beta"],
+      encoding_format: "float",
+      dimensions: 256,
+      user: "tenant-user",
+    });
+  });
+
+  test("builds embeddings bearer request", () => {
+    const config = testConfig();
+    const provider = config.providers.find((candidate) => candidate.id === "openai")!;
+    const model = config.models.find((candidate) => candidate.id === "openai/text-embedding-3-small")!;
+    const adapter = new OpenAICompatibleAdapter();
+    const request = adapter.buildEmbeddingsRequest({
+      provider,
+      model,
+      request: {
+        model: "embeddings",
+        input: "hello",
+      },
+      apiKey: "secret",
+      timeoutMs: 1000,
+    });
+
+    expect(request.url).toBe("https://api.openai.test/v1/embeddings");
+    expect((request.init.headers as Record<string, string>).authorization).toBe("Bearer secret");
+    expect(JSON.parse(String(request.init.body)).model).toBe("text-embedding-3-small");
   });
 });
 

@@ -1,4 +1,4 @@
-import type { GatewayModelConfig, GatewayUsage, OpenAIUsage } from "./types";
+import type { GatewayModelConfig, GatewayUsage, OpenAIEmbeddingsUsage, OpenAIUsage } from "./types";
 
 function numberFrom(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -66,6 +66,13 @@ export function toOpenAIUsage(usage: GatewayUsage): OpenAIUsage {
     ...(usage.reasoningTokens === undefined
       ? {}
       : { completion_tokens_details: { reasoning_tokens: usage.reasoningTokens } }),
+  };
+}
+
+export function toOpenAIEmbeddingsUsage(usage: GatewayUsage): OpenAIEmbeddingsUsage {
+  return {
+    prompt_tokens: usage.inputTokens,
+    total_tokens: usage.totalTokens,
   };
 }
 

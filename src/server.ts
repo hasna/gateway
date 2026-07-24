@@ -1,9 +1,16 @@
 import { gatewayErrorResponse, GatewayHttpError, jsonError } from "./errors";
 import { fingerprintGatewayKey } from "./budget";
 import { validateRuntimeSecrets } from "./config";
-import { createChatCompletion, createChatCompletionStream } from "./gateway";
+import { createChatCompletion, createChatCompletionStream, createEmbeddings } from "./gateway";
 import { GatewayKeyRateLimiter, gatewayRateLimitKey, type GatewayRateLimitExceeded } from "./rate-limit";
-import type { GatewayConfig, GatewayFetch, GatewayRuntimeOptions, OpenAIChatCompletionRequest } from "./types";
+import type {
+  GatewayConfig,
+  GatewayFetch,
+  GatewayRuntimeOptions,
+  OpenAIChatCompletionRequest,
+  OpenAIEmbeddingsInput,
+  OpenAIEmbeddingsRequest,
+} from "./types";
 import { gatewayVersion } from "./version";
 
 type ServerOptions = {
@@ -148,6 +155,69 @@ function responseCacheBypassRequested(request: Request, config: GatewayConfig): 
   if (value === null) return false;
   const normalized = value.trim().toLowerCase();
   return normalized === "" || !["0", "false", "no", "off"].includes(normalized);
+}
+
+function isToken(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isTokenArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length > 0 && value.every(isToken);
+}
+
+function isEmbeddingsInput(value: unknown): value is OpenAIEmbeddingsInput {
+  if (typeof value === "string") return true;
+  if (!Array.isArray(value) || value.length === 0) return false;
+  if (value.every((item) => typeof item === "string")) return true;
+  if (value.every(isToken)) return true;
+  return value.every(isTokenArray);
+}
+
+function validateEmbeddingsRequest(body: unknown): OpenAIEmbeddingsRequest {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new GatewayHttpError({
+      status: 400,
+      type: "gateway_bad_request",
+      code: "invalid_request",
+      message: "Embeddings request body must be an object.",
+    });
+  }
+
+  const request = body as OpenAIEmbeddingsRequest;
+  if (typeof request.model !== "string" || request.model.length === 0) {
+    throw new GatewayHttpError({
+      status: 400,
+      type: "gateway_bad_request",
+      code: "missing_model",
+      message: "Embeddings request requires a model string.",
+    });
+  }
+  if (!isEmbeddingsInput(request.input)) {
+    throw new GatewayHttpError({
+      status: 400,
+      type: "gateway_bad_request",
+      code: "missing_input",
+      message: "Embeddings request requires input as a string, string array, token array, or token array array.",
+    });
+  }
+  if (request.encoding_format !== undefined && typeof request.encoding_format !== "string") {
+    throw new GatewayHttpError({
+      status: 400,
+      type: "gateway_bad_request",
+      code: "invalid_encoding_format",
+      message: "Embeddings request encoding_format must be a string when provided.",
+    });
+  }
+  if (request.dimensions !== undefined && (!Number.isInteger(request.dimensions) || request.dimensions <= 0)) {
+    throw new GatewayHttpError({
+      status: 400,
+      type: "gateway_bad_request",
+      code: "invalid_dimensions",
+      message: "Embeddings request dimensions must be a positive integer when provided.",
+    });
+  }
+
+  return request;
 }
 
 function modelsResponse(config: GatewayConfig): Record<string, unknown> {
@@ -325,6 +395,31 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
         }
 
         const result = await createChatCompletion(runtimeWithRequestContext, body);
+        return json(request, options.config, result.body, result.status);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/embeddings") {
+        const body = validateEmbeddingsRequest(await parseJsonBody(request, options.config.server.maxRequestBodyBytes));
+        const gatewayKeyFingerprint = fingerprintGatewayKey(bearerToken(request));
+        const rateLimitKey = gatewayRateLimitKey(gatewayKeyFingerprint);
+        const rateLimitConfig = options.config.server.rateLimits?.perGatewayKey;
+        const rateLimitCheck = keyRateLimiter.checkAndConsumeRequest(rateLimitKey, rateLimitConfig);
+        if (!rateLimitCheck.allowed) {
+          return rateLimitResponse(request, options.config, rateLimitCheck.exceeded);
+        }
+
+        const runtimeWithRequestContext: GatewayRuntimeOptions = {
+          ...runtime,
+          budgetContext: {
+            gatewayKey: gatewayKeyFingerprint,
+            tenant: request.headers.get("x-gateway-tenant") ?? undefined,
+          },
+          rateLimit: {
+            onUsage: (usage) => keyRateLimiter.recordUsage(rateLimitKey, rateLimitConfig, usage),
+            requiresStreamingUsage: rateLimitConfig?.tokensPerMinute !== undefined,
+          },
+        };
+        const result = await createEmbeddings(runtimeWithRequestContext, body);
         return json(request, options.config, result.body, result.status);
       }
 

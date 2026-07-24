@@ -271,8 +271,14 @@ export type GatewayRequestOptions = {
   strict_openai_compatibility?: boolean;
 };
 
-export type OpenAIChatCompletionRequest = {
+export type GatewayRoutableRequest = {
   model: string;
+  user?: string;
+  gateway?: GatewayRequestOptions;
+  [key: string]: unknown;
+};
+
+export type OpenAIChatCompletionRequest = GatewayRoutableRequest & {
   messages: ChatMessage[];
   stream?: boolean;
   tools?: unknown[];
@@ -298,14 +304,21 @@ export type OpenAIChatCompletionRequest = {
   n?: number;
   presence_penalty?: number;
   frequency_penalty?: number;
-  user?: string;
-  gateway?: GatewayRequestOptions;
   provider_options?: Record<string, unknown>;
   providerOptions?: Record<string, unknown>;
   provider?: unknown;
   plugins?: unknown;
   session_id?: string;
   [key: string]: unknown;
+};
+
+export type OpenAIEmbeddingsInput = string | string[] | number[] | number[][];
+
+export type OpenAIEmbeddingsRequest = GatewayRoutableRequest & {
+  input: OpenAIEmbeddingsInput;
+  encoding_format?: "float" | "base64" | string;
+  dimensions?: number;
+  provider_options?: Record<string, unknown>;
 };
 
 export type GatewayUsage = {
@@ -329,6 +342,12 @@ export type OpenAIUsage = {
     reasoning_tokens?: number;
     [key: string]: unknown;
   };
+  [key: string]: unknown;
+};
+
+export type OpenAIEmbeddingsUsage = {
+  prompt_tokens: number;
+  total_tokens: number;
   [key: string]: unknown;
 };
 
@@ -391,20 +410,29 @@ export type ProviderAdapter = {
   kind: GatewayProviderKind;
   supports: GatewayModelCapability[];
   buildRequest(input: ProviderBuildInput): ProviderHttpRequest;
+  buildEmbeddingsRequest?(input: ProviderEmbeddingsBuildInput): ProviderHttpRequest;
   send(input: ProviderBuildInput): Promise<Response>;
   stream(input: ProviderBuildInput): Promise<Response>;
+  embed?(input: ProviderEmbeddingsBuildInput): Promise<Response>;
   mapError(response: Response, bodyText?: string): GatewayProviderError;
 };
 
-export type ProviderBuildInput = {
+export type ProviderBuildBaseInput = {
   provider: GatewayProviderConfig;
   model: GatewayModelConfig;
-  request: OpenAIChatCompletionRequest;
   apiKey: string;
   timeoutMs: number;
   env?: Record<string, string | undefined>;
   fetchImpl?: GatewayFetch;
   signal?: AbortSignal;
+};
+
+export type ProviderBuildInput = ProviderBuildBaseInput & {
+  request: OpenAIChatCompletionRequest;
+};
+
+export type ProviderEmbeddingsBuildInput = ProviderBuildBaseInput & {
+  request: OpenAIEmbeddingsRequest;
 };
 
 export type GatewayProviderError = {

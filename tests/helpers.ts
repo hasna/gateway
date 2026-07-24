@@ -70,6 +70,15 @@ export function testConfig(): GatewayConfig {
         aliases: ["coding", "china-coding"],
         capabilities: ["chat", "streaming", "tools"],
       },
+      {
+        id: "openai/text-embedding-3-small",
+        providerId: "openai",
+        providerModel: "text-embedding-3-small",
+        aliases: ["embeddings"],
+        capabilities: ["embeddings"],
+        inputUsdPerMillionTokens: 0.02,
+        outputUsdPerMillionTokens: 0,
+      },
     ],
     routes: [
       {
@@ -93,6 +102,17 @@ export function testConfig(): GatewayConfig {
           allowChineseProviders: true,
           allowLogging: true,
           allowedRegions: ["cn", "us"],
+        },
+      },
+      {
+        id: "embeddings",
+        mode: "fallback",
+        modelAliases: ["embeddings"],
+        fallbackModelIds: ["openai/text-embedding-3-small"],
+        dataPolicy: {
+          allowTraining: false,
+          allowChineseProviders: false,
+          blockedRegions: ["cn"],
         },
       },
     ],
