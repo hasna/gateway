@@ -24,6 +24,8 @@ export type GatewayRoutingMode =
   | "highest-throughput"
   | "balanced";
 
+export type GatewayRuntimeMode = "local" | "production-cloud";
+
 export type GatewayDataPolicy = {
   allowTraining?: boolean;
   allowLogging?: boolean;
@@ -121,6 +123,26 @@ export type GatewayStorageConfig = {
   cloud?: GatewayCloudStorageConfig;
 };
 
+export type GatewayServiceDiscoveryConfig = {
+  allowLocalProviderEndpoints: boolean;
+  allowedProviderBaseUrls?: string[];
+};
+
+export type GatewayHealthConfig = {
+  requireRuntimeSecrets: boolean;
+};
+
+export type GatewayRuntimeConfig = {
+  mode: GatewayRuntimeMode;
+  serviceDiscovery: GatewayServiceDiscoveryConfig;
+  health: GatewayHealthConfig;
+};
+
+export type GatewayRuntimeConfigInput = Partial<Omit<GatewayRuntimeConfig, "serviceDiscovery" | "health">> & {
+  serviceDiscovery?: Partial<GatewayServiceDiscoveryConfig>;
+  health?: Partial<GatewayHealthConfig>;
+};
+
 export type GatewayBudgetWindow = "per-request" | "daily" | "monthly" | "lifetime";
 
 export type GatewayBudgetMode = "hard" | "soft";
@@ -145,6 +167,7 @@ export type GatewayBudgetConfig = {
 };
 
 export type GatewayConfig = {
+  runtime: GatewayRuntimeConfig;
   server: GatewayServerConfig;
   auth: GatewayAuthConfig;
   storage: GatewayStorageConfig;
@@ -155,7 +178,8 @@ export type GatewayConfig = {
   budgets: GatewayBudgetConfig[];
 };
 
-export type GatewayConfigInput = Partial<GatewayConfig> & {
+export type GatewayConfigInput = Omit<Partial<GatewayConfig>, "runtime"> & {
+  runtime?: GatewayRuntimeConfigInput;
   presets?: string[];
 };
 

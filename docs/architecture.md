@@ -13,6 +13,11 @@ The server exposes public endpoints:
 
 The server should be lightweight and embeddable. It can run as a CLI process, be imported into another Bun service, or be wrapped by a hosted Hasna service.
 
+Runtime behavior is explicit:
+
+- `local` mode keeps local-first defaults, including loopback binding and a lightweight `/health` liveness response.
+- `production-cloud` mode is for a container or service behind cloud ingress. It requires gateway auth, non-loopback binding, cloud-safe provider discovery, and `/health` readiness that fails closed when the gateway key is missing or any configured production route cannot resolve to an eligible keyed provider.
+
 ### Request Normalizer
 
 The gateway accepts OpenAI-compatible request bodies. It should normalize:
@@ -93,6 +98,8 @@ Open source defaults should be local-first:
 - No Hasna cloud writes unless explicitly configured.
 
 The hosted Hasna platform can replace or extend storage with private tenant databases.
+
+Production cloud runtime remains config-owned in this open-source package. Live DNS, certificates, API Gateway resources, secret creation, and Terraform applies belong to the operator or private hosted wrapper, not to this package.
 
 ## Request Lifecycle
 

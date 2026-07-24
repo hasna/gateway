@@ -12,6 +12,8 @@ The default self-hosted behavior should be conservative:
 - Do not call a hosted Hasna endpoint unless the user configured it.
 - Do not route to China-region or China-owned providers unless the route or config allows them.
 
+Production cloud behavior must be explicit instead of inferred from deployment context. A config with `runtime.mode: "production-cloud"` should bind to a non-loopback interface, keep gateway auth required, require runtime secrets and route readiness for `/health`, and constrain provider discovery to HTTPS provider URLs plus any exact origins listed in `runtime.serviceDiscovery.allowedProviderBaseUrls`.
+
 ## Model Names
 
 Recommended naming:
@@ -93,6 +95,8 @@ The implemented open-source defaults are fail-closed:
 - `byokOnly: true`
 
 Routes that intentionally use providers known to log prompts must set `allowLogging: true` explicitly.
+
+Service discovery is also fail-closed in production cloud mode. Enabled providers must have an `apiKeyEnv`, local/private provider endpoints are rejected by default, and non-HTTPS endpoints require an explicit local endpoint allowlist. Dynamic model names can only select providers already present in config, so runtime requests cannot discover arbitrary provider hosts. The static URL checks do not resolve DNS; operators should still enforce network egress and private-address controls at the runtime boundary.
 
 ## Fallbacks
 

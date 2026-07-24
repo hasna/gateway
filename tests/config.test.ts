@@ -8,6 +8,142 @@ describe("config validation", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("defaults to local runtime mode", () => {
+    const result = validateConfig(testConfig());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.runtime).toEqual({
+        mode: "local",
+        serviceDiscovery: {
+          allowLocalProviderEndpoints: true,
+        },
+        health: {
+          requireRuntimeSecrets: false,
+        },
+      });
+    }
+  });
+
+  test("accepts explicit production cloud runtime boundaries", () => {
+    const config = testConfig();
+    config.runtime = {
+      mode: "production-cloud",
+      serviceDiscovery: {
+        allowLocalProviderEndpoints: false,
+        allowedProviderBaseUrls: ["https://api.openai.test", "https://api.deepseek.test"],
+      },
+      health: {
+        requireRuntimeSecrets: true,
+      },
+    };
+    config.server.host = "0.0.0.0";
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(true);
+  });
+
+  test("rejects production cloud runtime without fail-closed auth and health", () => {
+    const config = testConfig();
+    config.runtime = {
+      mode: "production-cloud",
+      serviceDiscovery: {
+        allowLocalProviderEndpoints: false,
+      },
+      health: {
+        requireRuntimeSecrets: false,
+      },
+    };
+    config.auth.required = false;
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const errors = result.errors.join("\n");
+      expect(errors).toContain("production-cloud runtime requires auth.required to be true");
+      expect(errors).toContain("production-cloud runtime requires server.host to bind a non-loopback interface");
+      expect(errors).toContain("production-cloud runtime requires runtime.health.requireRuntimeSecrets to be true");
+    }
+  });
+
+  test("rejects unsafe production cloud provider discovery", () => {
+    const config = testConfig();
+    config.runtime = {
+      mode: "production-cloud",
+      serviceDiscovery: {
+        allowLocalProviderEndpoints: false,
+        allowedProviderBaseUrls: ["https://api.deepseek.test"],
+      },
+      health: {
+        requireRuntimeSecrets: true,
+      },
+    };
+    config.server.host = "0.0.0.0";
+    config.providers[0] = {
+      ...config.providers[0],
+      baseUrl: "http://127.0.0.1:9999/v1",
+    };
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const errors = result.errors.join("\n");
+      expect(errors).toContain("provider openai baseUrl origin http://127.0.0.1:9999 is not in runtime.serviceDiscovery.allowedProviderBaseUrls");
+      expect(errors).toContain("provider openai baseUrl must not resolve to a local or private endpoint in production-cloud mode");
+      expect(errors).toContain("provider openai baseUrl must use https in production-cloud mode");
+    }
+  });
+
+  test("rejects production cloud IPv6 local and private provider endpoints", () => {
+    for (const baseUrl of ["https://[::1]/v1", "https://[fd00::1]/v1", "https://[fe80::1]/v1", "https://[::ffff:127.0.0.1]/v1"]) {
+      const config = testConfig();
+      config.runtime = {
+        mode: "production-cloud",
+        serviceDiscovery: {
+          allowLocalProviderEndpoints: false,
+        },
+        health: {
+          requireRuntimeSecrets: true,
+        },
+      };
+      config.server.host = "0.0.0.0";
+      config.providers[0] = {
+        ...config.providers[0],
+        baseUrl,
+      };
+
+      const result = validateConfig(config);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.join("\n")).toContain("provider openai baseUrl must not resolve to a local or private endpoint in production-cloud mode");
+      }
+    }
+  });
+
+  test("rejects public http provider endpoints even when allowlisted", () => {
+    const config = testConfig();
+    config.runtime = {
+      mode: "production-cloud",
+      serviceDiscovery: {
+        allowLocalProviderEndpoints: true,
+        allowedProviderBaseUrls: ["http://public.example.com", "https://api.deepseek.test"],
+      },
+      health: {
+        requireRuntimeSecrets: true,
+      },
+    };
+    config.server.host = "0.0.0.0";
+    config.providers[0] = {
+      ...config.providers[0],
+      baseUrl: "http://public.example.com/v1",
+    };
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("provider openai baseUrl must use https in production-cloud mode");
+    }
+  });
+
   test("rejects models with unknown providers", () => {
     const config = testConfig();
     config.models[0] = {

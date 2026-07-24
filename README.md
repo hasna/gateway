@@ -56,6 +56,7 @@ bun run typecheck
 bun test
 bun run build
 bun dist/cli/index.js validate --config gateway.config.example.json
+bun dist/cli/index.js validate --config gateway.config.production-cloud.example.json
 bun dist/cli/index.js smoke --config gateway.config.example.json --model fast
 bun dist/cli/index.js smoke --config gateway.config.example.json --all
 bun dist/cli/index.js budget-add --config gateway.config.json --id team-daily --window daily --tenant acme --model fast --max-usd 5 --max-total-tokens 100000
@@ -81,12 +82,28 @@ HTTP runtime smoke checks. It exposes `GET /health`, authenticated `GET /ready`,
 Required config examples:
 
 - `gateway.config.example.json`: mixed provider routes with explicit China-allowed aliases.
+- `gateway.config.production-cloud.example.json`: production cloud runtime with non-loopback binding, fail-closed health, gateway auth, HTTPS provider endpoints, and explicit provider endpoint allowlist.
 - `gateway.config.no-china.example.json`: OpenAI/OpenRouter-only policy with `cn` blocked.
 - `gateway.config.china.example.json`: Chinese provider routes with explicit `cn`/`sg` allowance.
 
 Provider keys are loaded from environment variables only. Do not put provider secrets in config files.
 
 Budgets live in the same JSON config and spend is calculated from the usage ledger. JSONL append through `storage.usageLedgerPath` is the local-first default. Daily, monthly, and lifetime budgets require either `storage.usageLedgerPath` or an explicit `storage.cloud` backend; per-request budgets can run without cumulative storage. Use `mode: "hard"` to block exhausted budgets with an OpenAI-compatible `402` error, or `mode: "soft"` to keep serving while exposing warnings in gateway metadata and ledger records.
+
+### Runtime Modes
+
+The default runtime mode is `local`. It preserves local-first behavior: the server binds to `127.0.0.1`, provider discovery is driven by the local JSON config, and `/health` stays a lightweight liveness check that does not require secrets.
+
+Set `runtime.mode` to `production-cloud` when running the gateway behind a cloud load balancer, API gateway, or Hasna-hosted wrapper. Production cloud mode makes the cloud path explicit and fail-closed:
+
+- `auth.required` must be `true`.
+- `server.host` must not be a loopback host; use `0.0.0.0` for container ingress.
+- `runtime.health.requireRuntimeSecrets` must be `true`, so `/health` returns `503` until the gateway key is present and every configured route has an eligible provider with its key present.
+- enabled providers must declare `apiKeyEnv`.
+- enabled provider `baseUrl` values must be HTTPS and must not be local/private endpoints unless an explicit local endpoint allowlist is configured. This is a static URL check; DNS and network egress controls remain operator responsibilities.
+- `runtime.serviceDiscovery.allowedProviderBaseUrls` can restrict enabled providers to exact provider URL origins.
+
+Production cloud mode does not create DNS, ACM, API Gateway, secrets, provider keys, or cloud infrastructure. Those deployment steps require an operator-owned deployment workflow outside this package.
 
 ## Documentation
 

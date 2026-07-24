@@ -1,6 +1,6 @@
-import { validateRuntimeSecrets } from "./config";
 import { gatewayErrorResponse, GatewayHttpError, jsonError } from "./errors";
 import { fingerprintGatewayKey } from "./budget";
+import { validateRuntimeSecrets } from "./config";
 import { createChatCompletion, createChatCompletionStream } from "./gateway";
 import { GatewayKeyRateLimiter, gatewayRateLimitKey, type GatewayRateLimitExceeded } from "./rate-limit";
 import type { GatewayConfig, GatewayFetch, GatewayRuntimeOptions, OpenAIChatCompletionRequest } from "./types";
@@ -214,6 +214,27 @@ function readinessResponse(config: GatewayConfig, env: Record<string, string | u
   };
 }
 
+function healthResponse(request: Request, config: GatewayConfig, env: Record<string, string | undefined>): Response {
+  const runtimeErrors = config.runtime.health.requireRuntimeSecrets ? validateRuntimeSecrets(config, env) : [];
+  const ready = runtimeErrors.length === 0;
+
+  return json(
+    request,
+    config,
+    {
+      status: ready ? "ok" : "unhealthy",
+      version: gatewayVersion,
+      runtime: {
+        mode: config.runtime.mode,
+      },
+      checks: {
+        runtimeSecrets: config.runtime.health.requireRuntimeSecrets ? (ready ? "ok" : "failed") : "not_required",
+      },
+    },
+    ready ? 200 : 503,
+  );
+}
+
 export function createGatewayHandler(options: ServerOptions): (request: Request) => Promise<Response> {
   const env = options.env ?? process.env;
   const keyRateLimiter = new GatewayKeyRateLimiter();
@@ -245,7 +266,7 @@ export function createGatewayHandler(options: ServerOptions): (request: Request)
 
     try {
       if (request.method === "GET" && url.pathname === "/health") {
-        return json(request, options.config, { status: "ok", version: gatewayVersion });
+        return healthResponse(request, options.config, env);
       }
 
       if (request.method === "GET" && url.pathname === "/version") {

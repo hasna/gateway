@@ -1,0 +1,69 @@
+{
+  "runtime": {
+    "mode": "production-cloud",
+    "serviceDiscovery": {
+      "allowLocalProviderEndpoints": false,
+      "allowedProviderBaseUrls": [
+        "https://api.openai.com",
+        "https://openrouter.ai"
+      ]
+    },
+    "health": {
+      "requireRuntimeSecrets": true
+    }
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8787,
+    "requestTimeoutMs": 60000,
+    "maxRequestBodyBytes": 1000000,
+    "includeGatewayMetadata": true,
+    "maxFallbackAttempts": 2
+  },
+  "auth": {
+    "apiKeyEnv": "GATEWAY_API_KEY",
+    "required": true
+  },
+  "policy": {
+    "allowTraining": false,
+    "allowLogging": false,
+    "allowChineseProviders": false,
+    "blockedRegions": ["cn"],
+    "byokOnly": true
+  },
+  "presets": ["openai", "openrouter"],
+  "routes": [
+    {
+      "id": "fast",
+      "mode": "fallback",
+      "modelAliases": ["fast"],
+      "fallbackModelIds": [
+        "openai/gpt-4o-mini",
+        "openrouter/openai/gpt-4.1-mini"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowLogging": false,
+        "allowChineseProviders": false,
+        "blockedRegions": ["cn"],
+        "byokOnly": true
+      }
+    },
+    {
+      "id": "coding",
+      "mode": "fallback",
+      "modelAliases": ["coding", "coding:no-china"],
+      "fallbackModelIds": [
+        "openai/gpt-4.1-mini",
+        "openrouter/openai/gpt-4.1-mini"
+      ],
+      "dataPolicy": {
+        "allowTraining": false,
+        "allowLogging": false,
+        "allowChineseProviders": false,
+        "blockedRegions": ["cn"],
+        "byokOnly": true
+      }
+    }
+  ]
+}

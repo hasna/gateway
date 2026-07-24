@@ -35,6 +35,7 @@
     ".env.example",
     "hasna.contract.json",
     "gateway.config.example.json",
+    "gateway.config.production-cloud.example.json",
     "gateway.config.china.example.json",
     "gateway.config.no-china.example.json"
   ],
