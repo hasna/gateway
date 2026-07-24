@@ -9,6 +9,7 @@ import {
   spendFromUsage,
 } from "./budget";
 import { adapterForProvider } from "./providers";
+import { providerCredentialEnv, providerRequiresCredential } from "./provider-config";
 import { resolveRoute } from "./router";
 import { transformOpenAICompatibleStream } from "./streaming";
 import type {
@@ -187,6 +188,27 @@ function requestWithStreamingUsage(request: OpenAIChatCompletionRequest): OpenAI
   };
 }
 
+function requestWithEffectivePolicy(
+  request: OpenAIChatCompletionRequest,
+  decision: GatewayRouteDecision,
+): OpenAIChatCompletionRequest {
+  return {
+    ...request,
+    gateway: {
+      ...(request.gateway ?? {}),
+      allow_training: decision.policy.allow_training,
+      allow_logging: decision.policy.allow_logging,
+      allow_chinese_providers: decision.policy.allow_chinese_providers,
+      zero_data_retention_required: decision.policy.zero_data_retention_required,
+      byok_only: decision.policy.byok_only,
+      ...(decision.policy.allowed_providers ? { allowed_providers: decision.policy.allowed_providers } : {}),
+      ...(decision.policy.blocked_providers ? { blocked_providers: decision.policy.blocked_providers } : {}),
+      ...(decision.policy.allowed_regions ? { allowed_regions: decision.policy.allowed_regions } : {}),
+      ...(decision.policy.blocked_regions ? { blocked_regions: decision.policy.blocked_regions } : {}),
+    },
+  };
+}
+
 function extractProviderMessage(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") return undefined;
   const record = payload as Record<string, unknown>;
@@ -214,9 +236,9 @@ async function parseProviderJson(response: Response): Promise<Record<string, unk
 }
 
 function apiKeyFor(candidate: GatewayRouteCandidate, env: Record<string, string | undefined>): string {
-  const apiKeyEnv = candidate.provider.apiKeyEnv;
+  const apiKeyEnv = providerCredentialEnv(candidate.provider);
   const apiKey = apiKeyEnv ? env[apiKeyEnv] : undefined;
-  if (!apiKey) {
+  if (providerRequiresCredential(candidate.provider) && !apiKey) {
     throw new GatewayHttpError({
       status: 400,
       type: "gateway_config_error",
@@ -224,21 +246,23 @@ function apiKeyFor(candidate: GatewayRouteCandidate, env: Record<string, string 
       message: `Provider ${candidate.provider.id} is missing API key env ${apiKeyEnv ?? "(none)"}.`,
     });
   }
-  return apiKey;
+  return apiKey ?? "";
 }
 
 async function callProvider(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
   candidate: GatewayRouteCandidate,
+  decision: GatewayRouteDecision,
 ): Promise<Response> {
   const adapter = adapterForProvider(candidate.provider);
   return adapter.send({
     provider: candidate.provider,
     model: candidate.model,
-    request,
+    request: requestWithEffectivePolicy(request, decision),
     apiKey: apiKeyFor(candidate, options.env ?? process.env),
     timeoutMs: options.config.server.requestTimeoutMs,
+    env: options.env ?? process.env,
     fetchImpl: options.fetchImpl,
   });
 }
@@ -247,14 +271,16 @@ async function openProviderStream(
   options: GatewayRuntimeOptions,
   request: OpenAIChatCompletionRequest,
   candidate: GatewayRouteCandidate,
+  decision: GatewayRouteDecision,
 ): Promise<Response> {
   const adapter = adapterForProvider(candidate.provider);
   return adapter.stream({
     provider: candidate.provider,
     model: candidate.model,
-    request,
+    request: requestWithEffectivePolicy(request, decision),
     apiKey: apiKeyFor(candidate, options.env ?? process.env),
     timeoutMs: options.config.server.requestTimeoutMs,
+    env: options.env ?? process.env,
     fetchImpl: options.fetchImpl,
   });
 }
@@ -299,7 +325,7 @@ export async function createChatCompletion(
         return cachedResult;
       }
 
-      const response = await callProvider(options, request, candidate);
+      const response = await callProvider(options, request, candidate, route.decision);
       const latencyMs = Date.now() - started;
 
       if (!response.ok) {
@@ -445,7 +471,7 @@ export async function createChatCompletionStream(
         ? requestWithStreamingUsage(request)
         : request;
       hardBudgetRequiresUsage = budgetStatuses.some((status) => status.budget.mode === "hard");
-      response = await openProviderStream(options, budgetedRequest, candidate);
+      response = await openProviderStream(options, budgetedRequest, candidate, route.decision);
     } catch (error) {
       lastError =
         error instanceof GatewayHttpError
