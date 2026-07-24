@@ -443,6 +443,113 @@ describe("HTTP server handler", () => {
     expect(text).toContain('"type":"gateway_rate_limit_error"');
     expect(text).toContain('"code":"gateway_token_usage_missing"');
   });
+
+  test("honors response cache bypass header", async () => {
+    const config = testConfig();
+    config.server.responseCache = {
+      ...config.server.responseCache,
+      enabled: true,
+      ttlMs: 60_000,
+    };
+    let callCount = 0;
+    const handler = createGatewayHandler({
+      config,
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+      fetchImpl: async () => {
+        callCount += 1;
+        return jsonResponse({
+          id: `provider-${callCount}`,
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: `ok-${callCount}` },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      },
+    });
+    const body = JSON.stringify({ model: "coding", messages: [{ role: "user", content: "hi" }] });
+
+    const cachedResponse = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body,
+      }),
+    );
+    const bypassResponse = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+          "x-gateway-cache-bypass": "true",
+        },
+        body,
+      }),
+    );
+    const cachedAgainResponse = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body,
+      }),
+    );
+
+    expect(cachedResponse.status).toBe(200);
+    expect(bypassResponse.status).toBe(200);
+    expect(cachedAgainResponse.status).toBe(200);
+    expect((await cachedResponse.json()).id).toBe("provider-1");
+    expect((await bypassResponse.json()).id).toBe("provider-2");
+    expect((await cachedAgainResponse.json()).id).toBe("provider-2");
+    expect(callCount).toBe(2);
+  });
+
+  test("does not cache streaming chat responses", async () => {
+    const config = testConfig();
+    config.server.responseCache = {
+      ...config.server.responseCache,
+      enabled: true,
+      ttlMs: 60_000,
+    };
+    let callCount = 0;
+    const handler = createGatewayHandler({
+      config,
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+      fetchImpl: async () => {
+        callCount += 1;
+        return new Response(
+          `data: {"id":"chunk-${callCount}","object":"chat.completion.chunk","choices":[]}\n\ndata: [DONE]\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+
+    for (let index = 0; index < 2; index += 1) {
+      const response = await handler(
+        new Request("http://localhost/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            authorization: "Bearer gateway",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ model: "coding", stream: true, messages: [{ role: "user", content: "hi" }] }),
+        }),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain(`chunk-${index + 1}`);
+    }
+
+    expect(callCount).toBe(2);
+  });
 });
 
 function chatRequest(token: string, overrides: Record<string, unknown> = {}): Request {

@@ -2,6 +2,33 @@ import { describe, expect, test } from "bun:test";
 import { createChatCompletion } from "../src/gateway";
 import { testConfig, jsonResponse } from "./helpers";
 
+const env = {
+  GATEWAY_API_KEY: "gateway",
+  OPENAI_API_KEY: "openai",
+  DEEPSEEK_API_KEY: "deepseek",
+};
+
+function providerResponse(content: string): Response {
+  return jsonResponse({
+    id: `provider-${content}`,
+    object: "chat.completion",
+    created: 1,
+    model: "gpt-4.1-mini",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: "stop",
+      },
+    ],
+    usage: {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+    },
+  });
+}
+
 function anthropicTestConfig() {
   const config = testConfig();
   config.providers.push({
@@ -378,5 +405,197 @@ describe("chat completion lifecycle", () => {
         },
       ),
     ).rejects.toThrow("No allowed provider can satisfy model 'gemini'.");
+  });
+
+  test("does not cache responses by default", async () => {
+    const config = testConfig();
+    let callCount = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      callCount += 1;
+      return providerResponse(`fresh-${callCount}`);
+    };
+    const request = {
+      model: "coding",
+      messages: [{ role: "user" as const, content: "hi" }],
+    };
+
+    const first = await createChatCompletion({ config, env, fetchImpl }, request);
+    const second = await createChatCompletion({ config, env, fetchImpl }, request);
+
+    expect(callCount).toBe(2);
+    expect(first.body.id).toBe("provider-fresh-1");
+    expect(second.body.id).toBe("provider-fresh-2");
+  });
+
+  test("caches identical non-streaming responses within TTL", async () => {
+    const config = testConfig();
+    config.server.responseCache = {
+      ...config.server.responseCache,
+      enabled: true,
+      ttlMs: 60_000,
+    };
+    let callCount = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      callCount += 1;
+      return providerResponse(`cached-${callCount}`);
+    };
+    const request = {
+      model: "coding",
+      messages: [{ role: "user" as const, content: "same prompt" }],
+    };
+    const options = {
+      config,
+      env,
+      fetchImpl,
+      budgetContext: { gatewayKey: "key-a", tenant: "tenant-a" },
+    };
+
+    const first = await createChatCompletion(options, request);
+    first.body.id = "mutated-by-caller";
+    const second = await createChatCompletion(options, request);
+
+    expect(callCount).toBe(1);
+    expect(second.body.id).toBe("provider-cached-1");
+  });
+
+  test("normalizes message object key order for cache keys", async () => {
+    const config = testConfig();
+    config.server.responseCache = {
+      ...config.server.responseCache,
+      enabled: true,
+      ttlMs: 60_000,
+    };
+    let callCount = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      callCount += 1;
+      return providerResponse(`normalized-${callCount}`);
+    };
+    const options = {
+      config,
+      env,
+      fetchImpl,
+      budgetContext: { gatewayKey: "key-a", tenant: "tenant-a" },
+    };
+
+    const first = await createChatCompletion(options, {
+      model: "coding",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    const second = await createChatCompletion(options, {
+      model: "coding",
+      messages: [{ role: "user", content: [{ text: "hi", type: "text" }] }],
+    });
+
+    expect(callCount).toBe(1);
+    expect(first.body.id).toBe("provider-normalized-1");
+    expect(second.body.id).toBe("provider-normalized-1");
+  });
+
+  test("does not reuse cached metadata across requested routing options", async () => {
+    const config = testConfig();
+    config.server.responseCache = {
+      ...config.server.responseCache,
+      enabled: true,
+      ttlMs: 60_000,
+    };
+    let callCount = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      callCount += 1;
+      return providerResponse(`routing-${callCount}`);
+    };
+    const options = {
+      config,
+      env,
+      fetchImpl,
+      budgetContext: { gatewayKey: "key-a", tenant: "tenant-a" },
+    };
+
+    const fallback = await createChatCompletion(options, {
+      model: "coding",
+      messages: [{ role: "user", content: "same prompt" }],
+      gateway: { routing: "fallback" },
+    });
+    const cheapest = await createChatCompletion(options, {
+      model: "coding",
+      messages: [{ role: "user", content: "same prompt" }],
+      gateway: { routing: "cheapest" },
+    });
+
+    expect(callCount).toBe(2);
+    expect((fallback.body.gateway as { route_decision: { mode: string } }).route_decision.mode).toBe("fallback");
+    expect((cheapest.body.gateway as { route_decision: { mode: string } }).route_decision.mode).toBe("cheapest");
+  });
+
+  test("expires cached responses after TTL", async () => {
+    const config = testConfig();
+    config.server.responseCache = {
+      ...config.server.responseCache,
+      enabled: true,
+      ttlMs: 1,
+    };
+    let callCount = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      callCount += 1;
+      return providerResponse(`ttl-${callCount}`);
+    };
+    const request = {
+      model: "coding",
+      messages: [{ role: "user" as const, content: "expiring prompt" }],
+    };
+    const options = {
+      config,
+      env,
+      fetchImpl,
+      budgetContext: { gatewayKey: "key-a", tenant: "tenant-a" },
+    };
+
+    const first = await createChatCompletion(options, request);
+    await Bun.sleep(5);
+    const second = await createChatCompletion(options, request);
+
+    expect(callCount).toBe(2);
+    expect(first.body.id).toBe("provider-ttl-1");
+    expect(second.body.id).toBe("provider-ttl-2");
+  });
+
+  test("isolates response cache by tenant and gateway key", async () => {
+    const config = testConfig();
+    config.server.responseCache = {
+      ...config.server.responseCache,
+      enabled: true,
+      ttlMs: 60_000,
+    };
+    let callCount = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      callCount += 1;
+      return providerResponse(`isolated-${callCount}`);
+    };
+    const request = {
+      model: "coding",
+      messages: [{ role: "user" as const, content: "shared prompt" }],
+    };
+
+    const tenantAFirst = await createChatCompletion(
+      { config, env, fetchImpl, budgetContext: { gatewayKey: "key-a", tenant: "tenant-a" } },
+      request,
+    );
+    const tenantASecond = await createChatCompletion(
+      { config, env, fetchImpl, budgetContext: { gatewayKey: "key-a", tenant: "tenant-a" } },
+      request,
+    );
+    const tenantB = await createChatCompletion(
+      { config, env, fetchImpl, budgetContext: { gatewayKey: "key-a", tenant: "tenant-b" } },
+      request,
+    );
+    const gatewayKeyB = await createChatCompletion(
+      { config, env, fetchImpl, budgetContext: { gatewayKey: "key-b", tenant: "tenant-a" } },
+      request,
+    );
+
+    expect(callCount).toBe(3);
+    expect(tenantAFirst.body.id).toBe("provider-isolated-1");
+    expect(tenantASecond.body.id).toBe("provider-isolated-1");
+    expect(tenantB.body.id).toBe("provider-isolated-2");
+    expect(gatewayKeyB.body.id).toBe("provider-isolated-3");
   });
 });

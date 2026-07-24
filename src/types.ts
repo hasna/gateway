@@ -95,11 +95,19 @@ export type GatewayServerConfig = {
   maxFallbackAttempts: number;
   corsAllowedOrigins: string[];
   rateLimits?: GatewayRateLimitConfig;
+  responseCache: GatewayResponseCacheConfig;
 };
 
 export type GatewayAuthConfig = {
   apiKeyEnv: string;
   required: boolean;
+};
+
+export type GatewayResponseCacheConfig = {
+  enabled: boolean;
+  ttlMs: number;
+  maxEntries: number;
+  bypassHeader: string;
 };
 
 export type GatewayGlobalPolicy = GatewayDataPolicy & {
@@ -178,8 +186,13 @@ export type GatewayConfig = {
   budgets: GatewayBudgetConfig[];
 };
 
-export type GatewayConfigInput = Omit<Partial<GatewayConfig>, "runtime"> & {
+export type GatewayServerConfigInput = Partial<Omit<GatewayServerConfig, "responseCache">> & {
+  responseCache?: Partial<GatewayResponseCacheConfig>;
+};
+
+export type GatewayConfigInput = Omit<Partial<GatewayConfig>, "runtime" | "server"> & {
   runtime?: GatewayRuntimeConfigInput;
+  server?: GatewayServerConfigInput;
   presets?: string[];
 };
 
@@ -357,5 +370,8 @@ export type GatewayRuntimeOptions = {
   rateLimit?: {
     onUsage?: (usage: GatewayUsage) => Promise<void> | void;
     requiresStreamingUsage?: boolean;
+  };
+  requestContext?: {
+    responseCacheBypass?: boolean;
   };
 };

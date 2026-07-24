@@ -56,6 +56,15 @@ const serverSchema = z
       })
       .passthrough()
       .optional(),
+    responseCache: z
+      .object({
+        enabled: z.boolean().optional(),
+        ttlMs: z.number().min(1).optional(),
+        maxEntries: z.number().int().min(1).optional(),
+        bypassHeader: z.string().min(1).optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
@@ -197,6 +206,12 @@ const defaultServer: GatewayServerConfig = {
   includeGatewayMetadata: true,
   maxFallbackAttempts: 3,
   corsAllowedOrigins: ["http://127.0.0.1:8787", "http://localhost:8787"],
+  responseCache: {
+    enabled: false,
+    ttlMs: 300_000,
+    maxEntries: 500,
+    bypassHeader: "x-gateway-cache-bypass",
+  },
 };
 
 const defaultAuth: GatewayAuthConfig = {
@@ -400,6 +415,10 @@ export function normalizeConfig(input: GatewayConfigInput): GatewayConfig {
     server: {
       ...defaultServer,
       ...(input.server ?? {}),
+      responseCache: {
+        ...defaultServer.responseCache,
+        ...(input.server?.responseCache ?? {}),
+      },
     },
     auth: {
       ...defaultAuth,
@@ -559,6 +578,9 @@ export function validateConfig(input: GatewayConfigInput): GatewayConfigValidati
       errors.push(`server.corsAllowedOrigins.${index} must be a valid origin URL.`);
     }
   }
+  assertNumber(config.server.responseCache.ttlMs, "server.responseCache.ttlMs", errors, 1);
+  assertNumber(config.server.responseCache.maxEntries, "server.responseCache.maxEntries", errors, 1);
+  assertString(config.server.responseCache.bypassHeader, "server.responseCache.bypassHeader", errors);
   assertString(config.auth.apiKeyEnv, "auth.apiKeyEnv", errors);
   assertCloudStorage(config, errors);
 
