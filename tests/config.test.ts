@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { interpolateEnvPlaceholders, validateConfig } from "../src/config";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  interpolateEnvPlaceholders,
+  loadGatewayConfig,
+  validateConfig,
+  validateRuntimeSecrets,
+} from "../src/config";
+import { GatewayHttpError } from "../src/errors";
 import { testConfig } from "./helpers";
 
 describe("config validation", () => {
@@ -368,5 +377,156 @@ describe("config validation", () => {
       expect(result.config.providers[0]?.dataPolicy).not.toHaveProperty("hostedAllowed");
       expect(result.config.providers[0]?.dataPolicy?.zeroDataRetentionAvailable).toBe(true);
     }
+  });
+
+  test("rejects invalid provider and model identifiers", () => {
+    const badProvider = validateConfig({
+      providers: [{ id: "x", displayName: "X", kind: "openai-compatible", apiKeyEnv: "K" }],
+      models: [{ id: "m", providerId: "x", providerModel: "m", capabilities: ["chat"] }],
+    });
+    expect(badProvider.ok).toBe(false);
+    if (!badProvider.ok) {
+      expect(badProvider.errors.join("\n")).toContain("must define baseUrl");
+    }
+
+    const badModel = validateConfig({
+      providers: [{ id: "x", displayName: "X", kind: "openai-compatible", baseUrl: "http://127.0.0.1:1/v1", apiKeyEnv: "K" }],
+      models: [{ id: "m", providerId: "missing", providerModel: "m", capabilities: ["chat"] }],
+    });
+    expect(badModel.ok).toBe(false);
+    if (!badModel.ok) {
+      expect(badModel.errors.join("\n")).toContain("unknown provider");
+    }
+  });
+
+  test("rejects duplicate budget ids", () => {
+    const config = testConfig();
+    config.storage.usageLedgerPath = "/tmp/ledger.jsonl";
+    config.budgets = [
+      { id: "dup", window: "daily", mode: "hard", maxTotalTokens: 10 },
+      { id: "dup", window: "daily", mode: "hard", maxTotalTokens: 20 },
+    ];
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("duplicated");
+    }
+  });
+
+  test("rejects empty providers and models", () => {
+    const emptyProviders = validateConfig({ providers: [], models: [{ id: "x", providerId: "y", providerModel: "z", capabilities: ["chat"] }] });
+    expect(emptyProviders.ok).toBe(false);
+    const emptyModels = validateConfig({
+      providers: [
+        {
+          id: "local",
+          displayName: "Local",
+          kind: "openai-compatible",
+          baseUrl: "http://127.0.0.1:9999/v1",
+          apiKeyEnv: "LOCAL_KEY",
+        },
+      ],
+      models: [],
+    });
+    expect(emptyModels.ok).toBe(false);
+  });
+
+  test("rejects budgets without any limits", () => {
+    const config = testConfig();
+    config.budgets = [{ id: "empty", window: "per-request", mode: "hard" }];
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("must define at least one");
+    }
+  });
+
+  test("rejects unknown providers in route allowlists and blocklists", () => {
+    const config = testConfig();
+    config.routes[0] = {
+      ...config.routes[0]!,
+      providerAllowlist: ["missing-provider"],
+      providerBlocklist: ["also-missing"],
+    };
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("allowlists unknown provider");
+      expect(result.errors.join("\n")).toContain("blocks unknown provider");
+    }
+  });
+
+  test("rejects models without capabilities", () => {
+    const config = testConfig();
+    config.models[0] = { ...config.models[0]!, capabilities: [] };
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain("capabilities");
+    }
+  });
+
+  test("loads gateway config from disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gateway-config-"));
+    const path = join(dir, "gateway.config.json");
+    writeFileSync(path, JSON.stringify(testConfig()));
+    const config = await loadGatewayConfig(path);
+    expect(config.providers.length).toBeGreaterThan(0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("throws config_not_found for missing files", async () => {
+    await expect(loadGatewayConfig("/tmp/does-not-exist-gateway-config.json")).rejects.toMatchObject({
+      code: "config_not_found",
+    });
+  });
+
+  test("throws config_invalid_json for malformed files", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gateway-config-"));
+    const path = join(dir, "gateway.config.json");
+    writeFileSync(path, "{not-json");
+    await expect(loadGatewayConfig(path)).rejects.toMatchObject({ code: "config_invalid_json" });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("throws config_invalid for non-object JSON", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gateway-config-"));
+    const path = join(dir, "gateway.config.json");
+    writeFileSync(path, JSON.stringify(["not", "object"]));
+    await expect(loadGatewayConfig(path)).rejects.toMatchObject({ code: "config_invalid" });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("throws config_env_missing for unresolved placeholders", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gateway-config-"));
+    const path = join(dir, "gateway.config.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        providers: [
+          {
+            id: "local",
+            displayName: "Local",
+            kind: "openai-compatible",
+            baseUrl: "${MISSING_URL}",
+            apiKeyEnv: "LOCAL_KEY",
+          },
+        ],
+        models: [{ id: "local/test", providerId: "local", providerModel: "test", capabilities: ["chat"] }],
+      }),
+    );
+    await expect(loadGatewayConfig(path)).rejects.toMatchObject({ code: "config_env_missing" });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("validates runtime secrets for gateway and provider keys", () => {
+    const config = testConfig();
+    expect(validateRuntimeSecrets(config, {})).toContain("Gateway API key env var GATEWAY_API_KEY is required.");
+    expect(
+      validateRuntimeSecrets(config, { GATEWAY_API_KEY: "gateway" }),
+    ).toContain("At least one enabled provider must have its apiKeyEnv set in the environment.");
+    expect(
+      validateRuntimeSecrets(config, { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" }),
+    ).toEqual([]);
   });
 });

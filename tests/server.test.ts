@@ -550,6 +550,202 @@ describe("HTTP server handler", () => {
 
     expect(callCount).toBe(2);
   });
+
+  test("responds to OPTIONS with CORS headers", async () => {
+    const config = testConfig();
+    config.server.corsAllowedOrigins = ["https://app.example.test"];
+    const handler = createGatewayHandler({ config, env: {} });
+    const response = await handler(
+      new Request("http://localhost/v1/models", {
+        method: "OPTIONS",
+        headers: { origin: "https://app.example.test" },
+      }),
+    );
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://app.example.test");
+    expect(response.headers.get("access-control-allow-methods")).toContain("POST");
+  });
+
+  test("returns 404 for unknown endpoints", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/unknown", {
+        headers: { authorization: "Bearer gateway" },
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.code).toBe("not_found");
+  });
+
+  test("returns gateway_key_missing when auth is required but env is unset", async () => {
+    const handler = createGatewayHandler({ config: testConfig(), env: {} });
+    const response = await handler(
+      new Request("http://localhost/v1/models", {
+        headers: { authorization: "Bearer gateway" },
+      }),
+    );
+    expect(response.status).toBe(500);
+    expect((await response.json()).error.code).toBe("gateway_key_missing");
+  });
+
+  test("rejects oversized body via content-length header", async () => {
+    const config = testConfig();
+    config.server.maxRequestBodyBytes = 10;
+    const handler = createGatewayHandler({
+      config,
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+          "content-length": "100",
+        },
+        body: JSON.stringify({ model: "coding", messages: [{ role: "user", content: "hi" }] }),
+      }),
+    );
+    expect(response.status).toBe(413);
+    expect((await response.json()).error.code).toBe("request_too_large");
+  });
+
+  test("rejects oversized body after reading bytes", async () => {
+    const config = testConfig();
+    config.server.maxRequestBodyBytes = 20;
+    const handler = createGatewayHandler({
+      config,
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "coding",
+          messages: [{ role: "user", content: "this body is definitely longer than twenty bytes" }],
+        }),
+      }),
+    );
+    expect(response.status).toBe(413);
+    expect((await response.json()).error.code).toBe("request_too_large");
+  });
+
+  test("rejects invalid JSON bodies", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: "{not-json",
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("invalid_json");
+  });
+
+  test("rejects non-object chat request bodies", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(["not", "an", "object"]),
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("invalid_request");
+  });
+
+  test("rejects chat requests without a model", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("missing_model");
+  });
+
+  test("rejects chat requests without messages", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "coding", messages: [] }),
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("missing_messages");
+  });
+
+  test("handles streaming chat completions", async () => {
+    const handler = createGatewayHandler({
+      config: testConfig(),
+      env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+      fetchImpl: async () =>
+        new Response(
+          [
+            'data: {"id":"chunk","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+            "data: [DONE]",
+            "",
+          ].join("\n\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    const response = await handler(
+      new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer gateway",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "coding",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const text = await response.text();
+    expect(text).toContain("data: [DONE]");
+  });
 });
 
 function chatRequest(token: string, overrides: Record<string, unknown> = {}): Request {

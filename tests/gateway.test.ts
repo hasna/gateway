@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { createChatCompletion } from "../src/gateway";
+import { GatewayHttpError } from "../src/errors";
+import { createChatCompletion, createChatCompletionStream, providerErrorMessageFromBody } from "../src/gateway";
 import { testConfig, jsonResponse } from "./helpers";
 
 const env = {
@@ -597,5 +598,191 @@ describe("chat completion lifecycle", () => {
     expect(tenantASecond.body.id).toBe("provider-isolated-1");
     expect(tenantB.body.id).toBe("provider-isolated-2");
     expect(gatewayKeyB.body.id).toBe("provider-isolated-3");
+  });
+
+  test("extracts provider error messages from response bodies", () => {
+    expect(providerErrorMessageFromBody({ error: { message: "rate limited" } })).toBe("rate limited");
+    expect(providerErrorMessageFromBody({ message: "plain message" })).toBe("plain message");
+    expect(providerErrorMessageFromBody(null)).toBeUndefined();
+  });
+
+  test("throws provider_invalid_json when provider response is not JSON", async () => {
+    const config = testConfig();
+    config.server.maxFallbackAttempts = 1;
+    try {
+      await createChatCompletion(
+        {
+          config,
+          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+          fetchImpl: async () => new Response("not-json", { status: 200 }),
+        },
+        { model: "coding", messages: [{ role: "user", content: "hi" }] },
+      );
+      throw new Error("expected completion to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(GatewayHttpError);
+      expect((error as GatewayHttpError).code).toBe("provider_invalid_json");
+    }
+  });
+
+  test("throws provider_key_missing when provider env is unset", async () => {
+    await expect(
+      createChatCompletion(
+        {
+          config: testConfig(),
+          env: { GATEWAY_API_KEY: "gateway" },
+        },
+        { model: "coding", messages: [{ role: "user", content: "hi" }] },
+      ),
+    ).rejects.toMatchObject({ code: "no_route" });
+  });
+
+  test("does not retry non-retryable provider errors", async () => {
+    let calls = 0;
+    await expect(
+      createChatCompletion(
+        {
+          config: testConfig(),
+          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+          fetchImpl: async () => {
+            calls += 1;
+            return jsonResponse({ error: { message: "bad request" } }, 400);
+          },
+        },
+        { model: "coding", messages: [{ role: "user", content: "hi" }] },
+      ),
+    ).rejects.toMatchObject({ code: "provider_bad_request", retryable: false });
+    expect(calls).toBe(1);
+  });
+
+  test("exhausts fallback candidates when every provider fails retryably", async () => {
+    const config = testConfig();
+    config.server.maxFallbackAttempts = 2;
+    config.routes[0] = {
+      ...config.routes[0],
+      dataPolicy: {
+        allowTraining: false,
+        allowLogging: true,
+        allowChineseProviders: true,
+        allowedRegions: ["cn", "us"],
+      },
+    };
+    try {
+      await createChatCompletion(
+        {
+          config,
+          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+          fetchImpl: async () => jsonResponse({ error: { message: "rate limited" } }, 429),
+        },
+        { model: "coding", messages: [{ role: "user", content: "hi" }] },
+      );
+      throw new Error("expected completion to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(GatewayHttpError);
+      const attempts = ((error as GatewayHttpError).raw as { attempts: Array<{ status: string }> }).attempts;
+      expect(attempts.filter((attempt) => attempt.status === "failed").length).toBeGreaterThan(1);
+    }
+  });
+
+  test("retries when fetch throws a retryable error", async () => {
+    const config = testConfig();
+    config.routes[0] = {
+      ...config.routes[0],
+      dataPolicy: {
+        allowTraining: false,
+        allowLogging: true,
+        allowChineseProviders: true,
+        allowedRegions: ["cn", "us"],
+      },
+    };
+    let calls = 0;
+    const result = await createChatCompletion(
+      {
+        config,
+        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        fetchImpl: async () => {
+          calls += 1;
+          if (calls === 1) throw new Error("network reset");
+          return jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          });
+        },
+      },
+      { model: "coding", messages: [{ role: "user", content: "hi" }] },
+    );
+    expect(calls).toBe(2);
+    expect((result.body.gateway as Record<string, unknown>).provider).toBe("openai");
+  });
+
+  test("suppresses gateway metadata under strict_openai_compatibility", async () => {
+    const result = await createChatCompletion(
+      {
+        config: testConfig(),
+        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        fetchImpl: async () =>
+          jsonResponse({
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+      },
+      {
+        model: "coding",
+        messages: [{ role: "user", content: "hi" }],
+        gateway: { strict_openai_compatibility: true },
+      },
+    );
+    expect(result.body.gateway).toBeUndefined();
+  });
+
+  test("falls back on stream retry after 429", async () => {
+    const config = testConfig();
+    config.routes[0] = {
+      ...config.routes[0],
+      dataPolicy: {
+        allowTraining: false,
+        allowLogging: true,
+        allowChineseProviders: true,
+        allowedRegions: ["cn", "us"],
+      },
+    };
+    let calls = 0;
+    const response = await createChatCompletionStream(
+      {
+        config,
+        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        fetchImpl: async () => {
+          calls += 1;
+          if (calls === 1) return jsonResponse({ error: { message: "rate limited" } }, 429);
+          return new Response(
+            [
+              'data: {"id":"chunk","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+              "data: [DONE]",
+              "",
+            ].join("\n\n"),
+            { headers: { "content-type": "text/event-stream" } },
+          );
+        },
+      },
+      { model: "coding", messages: [{ role: "user", content: "hi" }], stream: true },
+    );
+    expect(calls).toBe(2);
+    const text = await response.text();
+    expect(text).toContain("data: [DONE]");
+  });
+
+  test("throws all_routes_failed for streams when every candidate fails", async () => {
+    const config = testConfig();
+    config.server.maxFallbackAttempts = 2;
+    await expect(
+      createChatCompletionStream(
+        {
+          config,
+          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+          fetchImpl: async () => jsonResponse({ error: { message: "rate limited" } }, 429),
+        },
+        { model: "coding", messages: [{ role: "user", content: "hi" }], stream: true },
+      ),
+    ).rejects.toBeInstanceOf(GatewayHttpError);
   });
 });

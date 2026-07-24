@@ -433,4 +433,152 @@ describe("gateway MCP server", () => {
       await close();
     }
   });
+
+  test("returns gateway_health metadata", async () => {
+    const configPath = join(tempDir(), "gateway.config.json");
+    await writeConfig(configPath);
+    const { client, close } = await connectClient(configPath);
+    try {
+      const health = parseToolText(await client.callTool({ name: "gateway_health", arguments: {} }));
+      expect(health.ok).toBe(true);
+      expect(health.tools).toContain("gateway_validate_config");
+      expect(health.defaultConfigPath).toBe(configPath);
+    } finally {
+      await close();
+    }
+  });
+
+  test("returns explain_route failures with redacted decisions", async () => {
+    const configPath = join(tempDir(), "gateway.config.json");
+    await writeConfig(configPath);
+    const { client, close } = await connectClient(configPath);
+    try {
+      const route = parseToolText(
+        await client.callTool({
+          name: "gateway_explain_route",
+          arguments: {
+            request: { model: "coding", messages: [{ role: "user", content: "hello" }] },
+            env_present: [],
+            use_process_env: false,
+          },
+        }),
+      );
+      expect(route.ok).toBe(false);
+      expect(route.error.code).toBe("no_route");
+      expect(route.decision).toBeDefined();
+    } finally {
+      await close();
+    }
+  });
+
+  test("allows config_path overrides when enabled", async () => {
+    const configPath = join(tempDir(), "gateway.config.json");
+    const otherConfigPath = join(tempDir(), "other-gateway.config.json");
+    await writeConfig(configPath);
+    await writeConfig(otherConfigPath);
+    const { client, close } = await connectClient(configPath, { allowConfigPathOverrides: true });
+    try {
+      const result = parseToolText(
+        await client.callTool({
+          name: "gateway_validate_config",
+          arguments: { config_path: otherConfigPath },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(result.path).toBe(otherConfigPath);
+    } finally {
+      await close();
+    }
+  });
+
+  test("validates config without env interpolation when disabled", async () => {
+    const configPath = join(tempDir(), "gateway.config.json");
+    const config = testConfig();
+    config.storage = { usageLedgerPath: "${MISSING_LEDGER}.jsonl" };
+    await Bun.write(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    const { client, close } = await connectClient(configPath);
+    try {
+      const interpolated = await client.callTool({
+        name: "gateway_validate_config",
+        arguments: { interpolate_env: true },
+      });
+      expect(interpolated.isError).toBe(true);
+      const raw = parseToolText(
+        await client.callTool({ name: "gateway_validate_config", arguments: { interpolate_env: false } }),
+      );
+      expect(raw.ok).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  test("summarizes usage ledger when no ledger path is configured", async () => {
+    const configPath = join(tempDir(), "gateway.config.json");
+    const config = testConfig();
+    delete (config.storage as { usageLedgerPath?: string }).usageLedgerPath;
+    await Bun.write(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    const { client, close } = await connectClient(configPath);
+    try {
+      const summary = parseToolText(await client.callTool({ name: "gateway_usage_summary", arguments: {} }));
+      expect(summary.configured).toBe(false);
+      expect(summary.records).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  test("summarizes usage ledger when file is missing", async () => {
+    const configPath = join(tempDir(), "gateway.config.json");
+    const config = testConfig();
+    config.storage.usageLedgerPath = join(tempDir(), "missing-ledger.jsonl");
+    await Bun.write(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    const { client, close } = await connectClient(configPath);
+    try {
+      const summary = parseToolText(await client.callTool({ name: "gateway_usage_summary", arguments: {} }));
+      expect(summary.configured).toBe(true);
+      expect(summary.records).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  test("ignores malformed JSONL lines in usage summary", async () => {
+    const configPath = join(tempDir(), "gateway.config.json");
+    const ledgerPath = join(tempDir(), "usage.jsonl");
+    const config = testConfig();
+    config.storage.usageLedgerPath = ledgerPath;
+    await Bun.write(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    await Bun.write(
+      ledgerPath,
+      `not-json\n${JSON.stringify({
+        timestamp: "2026-06-24T00:01:00.000Z",
+        provider: "openai",
+        model: "openai/gpt-4.1-mini",
+        status: "success",
+        usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+      })}\n`,
+    );
+    const { client, close } = await connectClient(configPath);
+    try {
+      const summary = parseToolText(await client.callTool({ name: "gateway_usage_summary", arguments: {} }));
+      expect(summary.records).toBe(1);
+      expect(summary.totals.totalTokens).toBe(5);
+    } finally {
+      await close();
+    }
+  });
+
+  test("returns budget tool errors for missing config files", async () => {
+    const configPath = join(tempDir(), "missing-gateway.config.json");
+    const { client, close } = await connectClient(configPath);
+    try {
+      for (const name of ["gateway_budget_list", "gateway_budget_remaining"]) {
+        const result = await client.callTool({ name, arguments: {} });
+        expect(result.isError).toBe(true);
+      }
+    } finally {
+      await close();
+    }
+  });
+
 });

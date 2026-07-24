@@ -263,4 +263,138 @@ describe("routing policy", () => {
       ),
     ).toThrow(GatewayHttpError);
   });
+
+  test("routes dynamic provider/model ids", () => {
+    const result = resolveRoute(
+      {
+        config: testConfig(),
+        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai" },
+      },
+      {
+        model: "openai/gpt-4.1-mini",
+        messages: [{ role: "user", content: "hi" }],
+      },
+    );
+    expect(result.decision.selected).toBe("openai/gpt-4.1-mini");
+  });
+
+  test("skips disabled providers", () => {
+    const config = testConfig();
+    config.providers[0] = { ...config.providers[0]!, enabled: false };
+    expect(() =>
+      resolveRoute(
+        {
+          config,
+          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        },
+        request,
+      ),
+    ).toThrow(GatewayHttpError);
+  });
+
+  test("skips blocked providers", () => {
+    const config = testConfig();
+    config.routes[0] = {
+      ...config.routes[0]!,
+      providerBlocklist: ["openai"],
+      dataPolicy: {
+        allowTraining: false,
+        allowChineseProviders: true,
+        allowLogging: true,
+        allowedRegions: ["cn", "us"],
+      },
+    };
+    const result = resolveRoute(
+      {
+        config,
+        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+      },
+      request,
+    );
+    expect(result.decision.selected).toBe("deepseek/deepseek-v4-pro");
+  });
+
+  test("skips models that do not support tools", () => {
+    const config = testConfig();
+    config.models = config.models.map((model) => ({
+      ...model,
+      capabilities: model.capabilities.filter((capability) => capability !== "tools"),
+    }));
+    expect(() =>
+      resolveRoute(
+        {
+          config,
+          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        },
+        {
+          ...request,
+          tools: [{ type: "function", function: { name: "lookup", parameters: {} } }],
+        },
+      ),
+    ).toThrow(GatewayHttpError);
+  });
+
+  test("skips models that do not support streaming", () => {
+    const config = testConfig();
+    config.models = config.models.map((model) => ({
+      ...model,
+      capabilities: model.capabilities.filter((capability) => capability !== "streaming"),
+    }));
+    expect(() =>
+      resolveRoute(
+        {
+          config,
+          env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+        },
+        { ...request, stream: true },
+      ),
+    ).toThrow(GatewayHttpError);
+  });
+
+  test("honors request routing mode override", () => {
+    const config = testConfig();
+    config.routes[0] = {
+      ...config.routes[0]!,
+      mode: "fallback",
+      dataPolicy: {
+        allowTraining: false,
+        allowChineseProviders: true,
+        allowLogging: true,
+        allowedRegions: ["cn", "us"],
+      },
+    };
+    const result = resolveRoute(
+      {
+        config,
+        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+      },
+      {
+        ...request,
+        gateway: { routing: "cheapest" },
+      },
+    );
+    expect(result.decision.mode).toBe("cheapest");
+  });
+
+  test("skips models above configured price policy", () => {
+    const config = testConfig();
+    config.routes[0] = {
+      ...config.routes[0]!,
+      maxInputUsdPerMillionTokens: 0.1,
+      dataPolicy: {
+        allowTraining: false,
+        allowChineseProviders: true,
+        allowLogging: true,
+        allowedRegions: ["cn", "us"],
+      },
+    };
+    const result = resolveRoute(
+      {
+        config,
+        env: { GATEWAY_API_KEY: "gateway", OPENAI_API_KEY: "openai", DEEPSEEK_API_KEY: "deepseek" },
+      },
+      request,
+    );
+    expect(result.decision.selected).toBe("deepseek/deepseek-v4-pro");
+  });
 });
